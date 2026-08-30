@@ -74,15 +74,18 @@ Force-refresh and display detailed limits for the active account:
 Example status output:
 
 ```text
-pi-multi-account: enabled · auto-discover ON
-Current: anthropic/claude-opus-4-8
-Current limits: Claude | 5h 0% left/2h14m | 7d 92% left/1d18h
-Rotation (3): anthropic → openai-codex → openai-codex-account-2
-Registered login slots: anthropic-account-2, openai-codex-account-2
-Cooldowns: none
-Invalidated (need re-login): none
-Pending auto-resume: none
+pi-multi-account v1.20.0  ● 已启用  自动发现 ON
+账号     owner@example.com: Team
+模型     gpt-5.6-sol
+额度     可用  │  5h 剩余 86% · 4h 后重置  │  7d 剩余 83% · 6d13h 后重置
+轮换     owner@example.com: Team  →  member@example.com: Team
+恢复     全部账号当前可用
+子进程   2/2 可用
+操作     best  ·  next  ·  limits
+完整诊断  /multi-account status full
 ```
+
+The interactive view uses the active Pi theme for status, quota, warning, and muted text colors. Internal slot ids stay in `status full`; the compact view identifies accounts as `email: subscription` whenever quota metadata provides them.
 
 ### Commands
 

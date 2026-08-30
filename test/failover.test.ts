@@ -5798,11 +5798,37 @@ test("next says where it landed and whether that account is believed spent", asy
 });
 
 test("status is compact by default and points to full diagnostics", async () => {
-	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	const now = Date.now();
+	const t = setup({
+		current: { provider: "openai-codex-account-2", id: "gpt-5.6-sol" },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageByProvider: {
+				"openai-codex-account-2": {
+					provider: "openai-codex-account-2",
+					family: "codex",
+					fetchedAt: now,
+					credentialHash: createHash("sha256").update("c-tok-2").digest("hex").slice(0, 12),
+					account: "owner@example.com",
+					plan: "team",
+					serviceable: true,
+					primary: { usedPercent: 14, resetAt: now + 4 * 60 * 60 * 1000, windowSeconds: 18_000 },
+				},
+			},
+			lastSwitches: [],
+		},
+	});
 	await t.command("status");
 
 	const status = t.rec.notifies.at(-1) ?? "";
-	assert.match(status, /Current\s+anthropic\/claude-opus-4-8/);
+	assert.match(status, /账号\s+owner@example\.com: Team/);
+	assert.match(status, /模型\s+gpt-5.6-sol/);
+	assert.match(status, /额度\s+可用.*5h 剩余 86%/);
+	assert.doesNotMatch(status, /Codex A2|account-2/);
 	assert.match(status, /status full/);
 	assert.doesNotMatch(status, /Registered login slots/);
 	assert.doesNotMatch(status, /Resume watchdog/);
@@ -5822,10 +5848,17 @@ test("status shows how to switch to a specific account, not just next", async ()
 	await t.command("status");
 
 	const said = t.rec.notifies.join("\n");
+	assert.match(said, /best.*next.*limits/, `status must show common account actions; said: ${said}`);
+	assert.doesNotMatch(
+		t.rec.notifies.at(-1) ?? "",
+		/openai-codex-account-2/,
+		"compact status must describe people/subscriptions, not internal slot numbers",
+	);
+	await t.command("status full");
 	assert.match(
-		said,
+		t.rec.notifies.at(-1) ?? "",
 		/switch <provider>.*openai-codex-account-2|switch openai-codex-account-2/,
-		`status must show a usable switch example; said: ${said}`,
+		"full diagnostics must retain an exact switch command",
 	);
 });
 
@@ -5890,7 +5923,7 @@ test("status names the unmanaged providers instead of hiding them", async () => 
 	assert.match(said, /zai/, `status must list unmanaged rotation members; said: ${said}`);
 	assert.match(
 		said,
-		/no quota tracking|without quota|no usage/i,
+		/no quota tracking|without quota|no usage|无法追踪/i,
 		`and be honest that their quota is not tracked; said: ${said}`,
 	);
 });
@@ -7954,7 +7987,7 @@ test("with the proxy off, status says which slots an extension-free child cannot
 	});
 	await t.fire("session_start");
 	t.rec.notifies.length = 0;
-	await t.command("status");
+	await t.command("status full");
 	const status = t.rec.notifies.at(-1) ?? "";
 	assert.match(status, /Extension-free children: \d+\/\d+ rotation slots usable/);
 	// The numbered OAuth slot is the unusable one; the built-in and the API-key account are not.
@@ -7975,7 +8008,7 @@ test("with the proxy off, status warns that the account a bare child picks up is
 	});
 	await t.fire("session_start");
 	t.rec.notifies.length = 0;
-	await t.command("status");
+	await t.command("status full");
 	const status = t.rec.notifies.at(-1) ?? "";
 	assert.match(status, /openai-codex-account-2/);
 	assert.match(status, /first-available provider/);

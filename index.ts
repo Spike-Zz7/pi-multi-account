@@ -430,13 +430,16 @@ import {
 } from "./model-catalog.ts";
 import {
 	fetchUsageSnapshot,
+	formatResetDuration,
 	formatUsageCompact,
 	formatUsageDetails,
 	parseCodexUsageHeaders,
 	providerUsageLabel,
+	remainingPercent,
 	usageColor,
 	usageFamily,
 	UsageFetchError,
+	windowLabel,
 	type UsageSnapshot,
 	type UsageWindow,
 } from "./usage.ts";
@@ -8154,51 +8157,115 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			(arg1 ?? "").toLowerCase(),
 		);
 		if (!verboseStatus) {
+			const paint = (color: string, text: string) => {
+				try {
+					return ctx.ui.theme?.fg ? ctx.ui.theme.fg(color, text) : text;
+				} catch {
+					return text;
+				}
+			};
+			const bold = (text: string) => {
+				try {
+					return ctx.ui.theme?.bold ? ctx.ui.theme.bold(text) : text;
+				} catch {
+					return text;
+				}
+			};
+			const field = (name: string, value: string) =>
+				`${paint("muted", name.padEnd(6))} ${value}`;
+			const providerName = (provider: string) => {
+				switch (usageFamily(provider)) {
+					case "codex": return "Codex";
+					case "anthropic": return "Claude";
+					case "kimi-coding": return "Kimi";
+					case "cursor": return "Cursor";
+					case "ollama": return "Ollama";
+					case "qwen": return "Qwen";
+					default: return provider.replace(/-account-\d+$/, "");
+				}
+			};
+			const titleCase = (value: string | undefined) =>
+				value ? value.charAt(0).toUpperCase() + value.slice(1) : "订阅未知";
+			const snapshotFor = (provider: string) =>
+				cachedUsage(provider) ?? usageByProvider.get(provider);
+			const accountText = (provider: string) => {
+				const snapshot = snapshotFor(provider);
+				const account = snapshot?.account ?? providerName(provider);
+				return `${account}: ${titleCase(snapshot?.plan)}`;
+			};
+			const limitsText = (snapshot: UsageSnapshot | undefined) => {
+				if (!snapshot) {
+					return ctx.model && usageFamily(ctx.model.provider) === "qwen"
+						? qwenLiveStatus(ctx.model.provider)
+						: "尚未加载";
+				}
+				const display = displayUsageSnapshot(snapshot);
+				const parts: string[] = [];
+				if (display.serviceable === true) parts.push("可用");
+				else if (display.serviceable === false) parts.push("已用尽");
+				for (const [position, window] of [
+					["primary", display.primary],
+					["secondary", display.secondary],
+				] as const) {
+					if (!window) continue;
+					parts.push(
+						`${windowLabel(window, display.family, position)} 剩余 ${remainingPercent(window)}% · ${formatResetDuration(window.resetAt)} 后重置`,
+					);
+				}
+				if (!display.primary && !display.secondary && display.plan)
+					parts.push(display.plan);
+				return parts.join("  │  ") || "暂无额度数据";
+			};
+			const recovery = nextRecoveryStatus(ctx);
+			const recoveryText = recovery === "all rotation accounts available now"
+				? "全部账号当前可用"
+				: recovery;
 			const unmanaged = unmanagedRotationMembers();
 			const unconfigured = unconfiguredRotationMembers(ctx);
 			const statusLines = [
-				`pi-multi-account v${VERSION} · ${config.enabled ? "enabled" : "disabled"} · discovery ${config.autoDiscover ? "ON" : "OFF"}`,
-				`Current   ${current}`,
-				`Limits    ${
-					currentUsage
-						? formatUsageCompact(displayUsageSnapshot(currentUsage))
-						: ctx.model && usageFamily(ctx.model.provider) === "qwen"
-							? `${providerUsageLabel(ctx.model.provider)} | ${qwenLiveStatus(ctx.model.provider)}`
-							: "not loaded"
-				}`,
-				`Rotation  ${rotation.join(" → ") || "none — log in to an account"}`,
-				`Recovery  ${nextRecoveryStatus(ctx)}`,
+				paint("accent", bold(`pi-multi-account v${VERSION}`)) +
+					paint(config.enabled ? "success" : "error", config.enabled ? "  ● 已启用" : "  ● 已停用") +
+					paint("muted", `  自动发现 ${config.autoDiscover ? "ON" : "OFF"}`),
+				field("账号", paint("accent", bold(ctx.model ? accountText(ctx.model.provider) : "无"))),
+				field("模型", ctx.model ? ctx.model.id : "无"),
+				field("额度", paint(currentUsage ? usageColor(displayUsageSnapshot(currentUsage)) : "muted", limitsText(currentUsage))),
+				field("轮换", rotation.length ? rotation.map(accountText).join(paint("muted", "  →  ")) : "无账号，请先登录"),
+				field("恢复", paint("success", recoveryText)),
 			];
-			if (cooldowns.length)
-				statusLines.push(`Cooldowns ${cooldowns.join(", ")}`);
+			const compactCooldowns = [...exhaustedUntilByProvider.entries()]
+				.filter(([provider, until]) => until > Date.now() && !isInvalidated(provider))
+				.map(([provider, until]) => `${accountText(provider)} (${formatUntil(until)})`);
+			if (compactCooldowns.length)
+				statusLines.push(field("冷却", paint("warning", compactCooldowns.join(", "))));
 			if (invalids.length)
-				statusLines.push(`⚠ Re-login ${invalids.join(", ")}`);
+				statusLines.push(field("重登", paint("error", [...invalidatedByProvider.keys()].map(accountText).join(", "))));
 			if (unconfigured.length)
-				statusLines.push(`⚠ No models ${unconfigured.join(", ")}`);
+				statusLines.push(field("模型", paint("warning", `未配置：${unconfigured.map(accountText).join(", ")}`)));
 			if (duplicateSlots.length)
-				statusLines.push(
-					`Duplicates ${duplicateSlots.map(({ duplicate, primary }) => `${duplicate} = ${primary}`).join(", ")}`,
-				);
+				statusLines.push(field("重复", paint("warning", `${duplicateSlots.length} 个，请运行 status full 查看`)));
 			if (unmanaged.length)
-				statusLines.push(`No quota tracking ${unmanaged.join(", ")}`);
+				statusLines.push(field("额度", paint("warning", `无法追踪：${unmanaged.map(accountText).join(", ")}`)));
 			if (hasPendingResume())
-				statusLines.push(
-					`Auto-resume pending · ${persistedState.pendingReason ?? "unknown"}`,
-				);
+				statusLines.push(field("续跑", paint("warning", "等待自动恢复")));
 			if (queuedUserInputs.length)
-				statusLines.push(`Queued messages ${queuedUserInputs.length}`);
+				statusLines.push(field("队列", paint("warning", `${queuedUserInputs.length} 条消息`)));
+			const usableChildren = childView.length - childUnusable.length;
 			statusLines.push(
-				`Extension-free children: ${childView.length - childUnusable.length}/${childView.length} rotation slots usable${
-					childUnusable.length
-						? ` · cannot authenticate: ${childUnusable.map((verdict) => verdict.slotId).join(", ")}`
-						: ""
-				}${childRouteWarning ? `\n  ⚠ ${childRouteWarning}` : ""}`,
+				field(
+					"子进程",
+					paint(
+						childUnusable.length || childRouteWarning ? "warning" : "success",
+						`${usableChildren}/${childView.length} 可用${childUnusable.length ? ` · ${childUnusable.map((verdict) => accountText(verdict.slotId)).join(", ")} 暂不可用` : ""}`,
+					),
+				),
 			);
+			if (childRouteWarning)
+				statusLines.push(paint("warning", "  ⚠ 当前轮换账号无法供无扩展子进程使用；status full 可查看原因"));
 			if (lastContractVerdicts.some((verdict) => !verdict.ok))
-				statusLines.push("⚠ Pi file contract problem · run status full");
+				statusLines.push(paint("warning", "  ⚠ Pi 配置文件检查异常；请运行 status full"));
 			statusLines.push(
-				`Actions   best · switch ${rotation.find((p) => p !== ctx.model?.provider) ?? rotation[0] ?? "<provider>"} · next · limits`,
-				`Details   /multi-account status full`,
+				field("操作", paint("accent", "best  ·  next  ·  limits")),
+				paint("muted", "完整诊断  /multi-account status full"),
 			);
 			ctx.ui.notify(statusLines.join("\n"), "info");
 			return;
