@@ -144,6 +144,18 @@ type Credential = {
 };
 type Account = Record<string, Credential>;
 
+function codexAccessToken(accountId: string, userId: string): string {
+	const encode = (value: unknown) =>
+		Buffer.from(JSON.stringify(value)).toString("base64url");
+	return `${encode({ alg: "none", typ: "JWT" })}.${encode({
+		sub: `subject:${userId}`,
+		"https://api.openai.com/auth": {
+			chatgpt_account_id: accountId,
+			chatgpt_user_id: userId,
+		},
+	})}.signature`;
+}
+
 const TWO_ACCOUNTS: Account = {
 	anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
 	"openai-codex-account-2": {
@@ -1079,6 +1091,55 @@ test("same Codex accountId in two slots is one rotation account and shares coold
 	assert.ok(
 		state.exhaustedUntilByProvider?.["openai-codex-account-3"],
 		"all slots for the real account share cooldown",
+	);
+});
+
+test("different Team members sharing one Codex accountId remain separate rotation accounts", async () => {
+	const accounts: Account = {
+		anthropic: { type: "oauth", access: "a", refresh: "ar" },
+		"openai-codex": {
+			type: "oauth",
+			access: codexAccessToken("team-workspace", "team-member-a"),
+			refresh: "base-r",
+			accountId: "team-workspace",
+		},
+		"openai-codex-account-2": {
+			type: "oauth",
+			access: codexAccessToken("team-workspace", "team-member-b"),
+			refresh: "member-b-r",
+			accountId: "team-workspace",
+		},
+		"openai-codex-account-3": {
+			type: "oauth",
+			access: codexAccessToken("team-workspace", "team-member-a"),
+			refresh: "duplicate-a-r",
+			accountId: "team-workspace",
+		},
+	};
+	const t = setup({
+		accounts,
+		current: { provider: "openai-codex", id: "gpt-5.5" },
+		config: {
+			fallbacks: [
+				"openai-codex",
+				"openai-codex-account-3",
+				"openai-codex-account-2",
+				"anthropic",
+			],
+			autoContinue: false,
+		},
+	});
+	await finishError(t, "openai-codex", "gpt-5.5", "429 usage_limit_reached");
+	assert.equal(
+		t.rec.setModels[0],
+		"openai-codex-account-2/gpt-5.5",
+		"another member of the Team workspace must remain available",
+	);
+	const state = t.readState();
+	assert.ok(state.exhaustedUntilByProvider?.["openai-codex-account-3"]);
+	assert.ok(
+		!state.exhaustedUntilByProvider?.["openai-codex-account-2"],
+		"one Team member's cooldown must not poison another member",
 	);
 });
 

@@ -2103,9 +2103,30 @@ function getCursorSubFromAccessToken(token: string): string | undefined {
 	return typeof sub === "string" && sub.length > 0 ? sub : undefined;
 }
 
-function getCodexAccountIdFromAccessToken(token: string): string | undefined {
-	return decodeJwtPayload(token)?.["https://api.openai.com/auth"]
-		?.chatgpt_account_id as string | undefined;
+function getCodexIdentityFromAccessToken(token: string):
+	| { accountId: string; userId?: string }
+	| undefined {
+	const payload = decodeJwtPayload(token);
+	const auth = payload?.["https://api.openai.com/auth"];
+	const accountId = auth?.chatgpt_account_id;
+	if (typeof accountId !== "string" || accountId.length === 0) return undefined;
+	const userId = [
+		auth?.chatgpt_user_id,
+		auth?.user_id,
+		payload?.sub,
+	].find((value) => typeof value === "string" && value.length > 0);
+	return {
+		accountId,
+		...(typeof userId === "string" ? { userId } : {}),
+	};
+}
+
+function codexAccountIdentity(token: string): string | undefined {
+	const identity = getCodexIdentityFromAccessToken(token);
+	if (!identity) return undefined;
+	return identity.userId
+		? `codex-member:${hash12(identity.accountId)}:${hash12(identity.userId)}`
+		: `acct:${hash12(identity.accountId)}`;
 }
 
 function hash12(input: string) {
@@ -2121,19 +2142,21 @@ function credentialHash(entry: AuthEntry): string | undefined {
 /**
  * Identity of the REAL underlying account, used to detect the same account logged into multiple
  * slots. Deterministic where the data allows it:
- *   - `accountId` stored in auth.json (Codex/ChatGPT) → rock-solid, survives re-login.
- *   - else the account id embedded in a JWT access token (Codex fallback).
+ *   - Codex/ChatGPT JWT workspace + user ids → distinguishes members of one Team workspace.
+ *   - else `accountId` stored in auth.json (Codex/ChatGPT workspace fallback).
  *   - else a hash of the API key (same key = same account).
  *   - else a hash of the opaque access token. Opaque OAuth tokens (Anthropic) change on every login,
  *     so this only catches the literal same-token case. Two separate logins of the same Anthropic
  *     account are not deterministically identifiable from auth.json alone.
  */
 function accountIdentity(entry: AuthEntry): string | undefined {
+	if (entry.access) {
+		const codexIdentity = codexAccountIdentity(entry.access);
+		if (codexIdentity) return codexIdentity;
+	}
 	if (typeof entry.accountId === "string" && entry.accountId.length > 0)
 		return `acct:${hash12(entry.accountId)}`;
 	if (entry.access) {
-		const codexId = getCodexAccountIdFromAccessToken(entry.access);
-		if (codexId) return `codex:${hash12(codexId)}`;
 		const cursorSub = getCursorSubFromAccessToken(entry.access);
 		if (cursorSub) return `cursor:${hash12(cursorSub)}`;
 		return `tok:${hash12(entry.access)}`;
@@ -2151,12 +2174,12 @@ function accountIdentity(entry: AuthEntry): string | undefined {
  * lifted by rotating a token anyway, so erring toward "keep the cooldown" is correct.
  */
 function stableAccountFingerprint(entry: AuthEntry): string | undefined {
+	if (entry.access) {
+		const codexIdentity = codexAccountIdentity(entry.access);
+		if (codexIdentity) return codexIdentity;
+	}
 	if (typeof entry.accountId === "string" && entry.accountId.length > 0)
 		return `acct:${hash12(entry.accountId)}`;
-	if (entry.access) {
-		const codexId = getCodexAccountIdFromAccessToken(entry.access);
-		if (codexId) return `codex:${hash12(codexId)}`;
-	}
 	if (entry.key) return `key:${hash12(entry.key)}`;
 	return undefined;
 }
