@@ -77,8 +77,12 @@ Example status output:
 pi-multi-account v1.20.0  ● 已启用  自动发现 ON
 账号     owner@example.com: Team
 模型     gpt-5.6-sol
-额度     可用  │  5h 剩余 86% · 4h 后重置  │  7d 剩余 83% · 6d13h 后重置
 轮换     owner@example.com: Team  →  member@example.com: Team
+全部额度
+  ● owner@example.com: Team  当前
+    可用  │  5h 剩余 86% · 4h 后重置  │  7d 剩余 83% · 6d13h 后重置
+  ● member@example.com: Team
+    可用  │  5h 剩余 42% · 2h12m 后重置  │  7d 剩余 71% · 5d8h 后重置
 恢复     全部账号当前可用
 子进程   2/2 可用
 操作     best  ·  next  ·  limits

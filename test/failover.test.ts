@@ -5808,6 +5808,16 @@ test("status is compact by default and points to full diagnostics", async () => 
 			lastProbeAtByProvider: {},
 			invalidatedByProvider: {},
 			usageByProvider: {
+				anthropic: {
+					provider: "anthropic",
+					family: "anthropic",
+					fetchedAt: now,
+					credentialHash: createHash("sha256").update("a-tok-1").digest("hex").slice(0, 12),
+					account: "claude@example.com",
+					plan: "pro",
+					serviceable: true,
+					primary: { usedPercent: 30, resetAt: now + 2 * 60 * 60 * 1000, windowSeconds: 18_000 },
+				},
 				"openai-codex-account-2": {
 					provider: "openai-codex-account-2",
 					family: "codex",
@@ -5827,7 +5837,9 @@ test("status is compact by default and points to full diagnostics", async () => 
 	const status = t.rec.notifies.at(-1) ?? "";
 	assert.match(status, /账号\s+owner@example\.com: Team/);
 	assert.match(status, /模型\s+gpt-5.6-sol/);
-	assert.match(status, /额度\s+可用.*5h 剩余 86%/);
+	assert.match(status, /全部额度/);
+	assert.match(status, /owner@example\.com: Team\s+当前\n\s+可用.*5h 剩余 86%/);
+	assert.match(status, /claude@example\.com: Pro\n\s+可用.*5h 剩余 70%/);
 	assert.doesNotMatch(status, /Codex A2|account-2/);
 	assert.match(status, /status full/);
 	assert.doesNotMatch(status, /Registered login slots/);

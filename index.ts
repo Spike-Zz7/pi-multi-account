@@ -8222,14 +8222,25 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				: recovery;
 			const unmanaged = unmanagedRotationMembers();
 			const unconfigured = unconfiguredRotationMembers(ctx);
+			const quotaLines = rotation.map((provider) => {
+				const snapshot = snapshotFor(provider);
+				const isCurrent = provider === ctx.model?.provider;
+				const color = snapshot
+					? usageColor(displayUsageSnapshot(snapshot))
+					: "muted";
+				return `  ${paint(color, "●")} ${
+					isCurrent ? paint("accent", bold(accountText(provider))) : bold(accountText(provider))
+				}${isCurrent ? paint("muted", "  当前") : ""}\n    ${paint(color, limitsText(snapshot))}`;
+			});
 			const statusLines = [
 				paint("accent", bold(`pi-multi-account v${VERSION}`)) +
 					paint(config.enabled ? "success" : "error", config.enabled ? "  ● 已启用" : "  ● 已停用") +
 					paint("muted", `  自动发现 ${config.autoDiscover ? "ON" : "OFF"}`),
 				field("账号", paint("accent", bold(ctx.model ? accountText(ctx.model.provider) : "无"))),
 				field("模型", ctx.model ? ctx.model.id : "无"),
-				field("额度", paint(currentUsage ? usageColor(displayUsageSnapshot(currentUsage)) : "muted", limitsText(currentUsage))),
 				field("轮换", rotation.length ? rotation.map(accountText).join(paint("muted", "  →  ")) : "无账号，请先登录"),
+				paint("muted", "全部额度"),
+				...(quotaLines.length ? quotaLines : [paint("muted", "  暂无账号")]),
 				field("恢复", paint("success", recoveryText)),
 			];
 			const compactCooldowns = [...exhaustedUntilByProvider.entries()]
