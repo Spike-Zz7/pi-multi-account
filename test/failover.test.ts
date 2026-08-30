@@ -3187,7 +3187,7 @@ test(
 
 		await t.fire("session_start");
 		await wait(120);
-		await t.command("status");
+		await t.command("status full");
 
 		const status = t.rec.notifies.find((message) =>
 			message.includes("Registered login slots"),
@@ -3219,7 +3219,7 @@ test(
 		try {
 			await t.command("rediscover");
 			await wait(120);
-			await t.command("status");
+			await t.command("status full");
 			const status = t.rec.notifies
 				.filter((message) => message.includes("Registered login slots"))
 				.at(-1);
@@ -5795,6 +5795,23 @@ test("next says where it landed and whether that account is believed spent", asy
 		/spent|cooling|cooldown/i,
 		`and admit that account is believed spent; said: ${said}`,
 	);
+});
+
+test("status is compact by default and points to full diagnostics", async () => {
+	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	await t.command("status");
+
+	const status = t.rec.notifies.at(-1) ?? "";
+	assert.match(status, /Current\s+anthropic\/claude-opus-4-8/);
+	assert.match(status, /status full/);
+	assert.doesNotMatch(status, /Registered login slots/);
+	assert.doesNotMatch(status, /Resume watchdog/);
+	assert.doesNotMatch(status, /Other commands:/);
+
+	await t.command("status full");
+	const fullStatus = t.rec.notifies.at(-1) ?? "";
+	assert.match(fullStatus, /Registered login slots/);
+	assert.match(fullStatus, /Resume watchdog/);
 });
 
 test("status shows how to switch to a specific account, not just next", async () => {

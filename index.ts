@@ -8150,6 +8150,59 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const invalids = [...invalidatedByProvider.entries()].map(
 			([p, r]) => `${p} (${r.reason.slice(0, 40)})`,
 		);
+		const verboseStatus = ["full", "verbose", "details"].includes(
+			(arg1 ?? "").toLowerCase(),
+		);
+		if (!verboseStatus) {
+			const unmanaged = unmanagedRotationMembers();
+			const unconfigured = unconfiguredRotationMembers(ctx);
+			const statusLines = [
+				`pi-multi-account v${VERSION} · ${config.enabled ? "enabled" : "disabled"} · discovery ${config.autoDiscover ? "ON" : "OFF"}`,
+				`Current   ${current}`,
+				`Limits    ${
+					currentUsage
+						? formatUsageCompact(displayUsageSnapshot(currentUsage))
+						: ctx.model && usageFamily(ctx.model.provider) === "qwen"
+							? `${providerUsageLabel(ctx.model.provider)} | ${qwenLiveStatus(ctx.model.provider)}`
+							: "not loaded"
+				}`,
+				`Rotation  ${rotation.join(" → ") || "none — log in to an account"}`,
+				`Recovery  ${nextRecoveryStatus(ctx)}`,
+			];
+			if (cooldowns.length)
+				statusLines.push(`Cooldowns ${cooldowns.join(", ")}`);
+			if (invalids.length)
+				statusLines.push(`⚠ Re-login ${invalids.join(", ")}`);
+			if (unconfigured.length)
+				statusLines.push(`⚠ No models ${unconfigured.join(", ")}`);
+			if (duplicateSlots.length)
+				statusLines.push(
+					`Duplicates ${duplicateSlots.map(({ duplicate, primary }) => `${duplicate} = ${primary}`).join(", ")}`,
+				);
+			if (unmanaged.length)
+				statusLines.push(`No quota tracking ${unmanaged.join(", ")}`);
+			if (hasPendingResume())
+				statusLines.push(
+					`Auto-resume pending · ${persistedState.pendingReason ?? "unknown"}`,
+				);
+			if (queuedUserInputs.length)
+				statusLines.push(`Queued messages ${queuedUserInputs.length}`);
+			statusLines.push(
+				`Extension-free children: ${childView.length - childUnusable.length}/${childView.length} rotation slots usable${
+					childUnusable.length
+						? ` · cannot authenticate: ${childUnusable.map((verdict) => verdict.slotId).join(", ")}`
+						: ""
+				}${childRouteWarning ? `\n  ⚠ ${childRouteWarning}` : ""}`,
+			);
+			if (lastContractVerdicts.some((verdict) => !verdict.ok))
+				statusLines.push("⚠ Pi file contract problem · run status full");
+			statusLines.push(
+				`Actions   best · switch ${rotation.find((p) => p !== ctx.model?.provider) ?? rotation[0] ?? "<provider>"} · next · limits`,
+				`Details   /multi-account status full`,
+			);
+			ctx.ui.notify(statusLines.join("\n"), "info");
+			return;
+		}
 		ctx.ui.notify(
 			[
 				`pi-multi-account v${VERSION}: ${config.enabled ? "enabled" : "disabled"}${config.autoDiscover ? " · auto-discover ON" : " · auto-discover OFF"}`,

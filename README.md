@@ -90,7 +90,7 @@ All three names are aliases for the same command: `/multi-account`, `/provider-f
 
 | Subcommand | Description |
 |---|---|
-| `status` (default) | Show enabled state, current model, rotation, login slots, cooldowns, invalidations, pending resume. |
+| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. Use `status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
 | `limits [refresh]` | Show active-account 5h/7d limits; `refresh` bypasses the cache. Aliases: `usage`, `quota`. |
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
 | `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |
