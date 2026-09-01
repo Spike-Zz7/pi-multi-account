@@ -86,18 +86,18 @@ pi-multi-account v1.20.0  ● 已启用  自动发现 ON
 恢复     全部账号当前可用
 子进程   2/2 可用
 操作     best  ·  next  ·  limits
-完整诊断  /multi-account status full
+完整诊断  /status full
 ```
 
 The interactive view uses the active Pi theme for status, quota, warning, and muted text colors. Internal slot ids stay in `status full`; the compact view identifies accounts as `email: subscription` whenever quota metadata provides them.
 
 ### Commands
 
-All three names are aliases for the same command: `/multi-account`, `/provider-failover`, `/failover`.
+Use `/status` for the account overview (`/status full` for complete diagnostics). The management command keeps its three aliases: `/multi-account`, `/provider-failover`, `/failover`.
 
 | Subcommand | Description |
 |---|---|
-| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. Use `status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
+| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. This is also available directly as `/status`; use `/status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
 | `limits [refresh]` | Show active-account 5h/7d limits; `refresh` bypasses the cache. Aliases: `usage`, `quota`. |
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
 | `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |

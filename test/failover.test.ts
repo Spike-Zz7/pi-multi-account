@@ -555,8 +555,8 @@ function setup(opts: {
 		}
 		return result;
 	};
-	const command = async (args: string) =>
-		commands["multi-account"]?.(args, ctx);
+	const command = async (args: string, name = "multi-account") =>
+		commands[name]?.(args, ctx);
 	const input = async (text: string, images?: any[]) =>
 		fire("input", { type: "input", text, images, source: "interactive" });
 
@@ -5832,7 +5832,7 @@ test("status is compact by default and points to full diagnostics", async () => 
 			lastSwitches: [],
 		},
 	});
-	await t.command("status");
+	await t.command("", "status");
 
 	const status = t.rec.notifies.at(-1) ?? "";
 	assert.match(status, /账号\s+owner@example\.com: Team/);
@@ -5841,12 +5841,12 @@ test("status is compact by default and points to full diagnostics", async () => 
 	assert.match(status, /owner@example\.com: Team\s+当前\n\s+可用.*5h 剩余 86%/);
 	assert.match(status, /claude@example\.com: Pro\n\s+可用.*5h 剩余 70%/);
 	assert.doesNotMatch(status, /Codex A2|account-2/);
-	assert.match(status, /status full/);
+	assert.match(status, /\/status full/);
 	assert.doesNotMatch(status, /Registered login slots/);
 	assert.doesNotMatch(status, /Resume watchdog/);
 	assert.doesNotMatch(status, /Other commands:/);
 
-	await t.command("status full");
+	await t.command("full", "status");
 	const fullStatus = t.rec.notifies.at(-1) ?? "";
 	assert.match(fullStatus, /Registered login slots/);
 	assert.match(fullStatus, /Resume watchdog/);

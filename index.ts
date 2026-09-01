@@ -8276,7 +8276,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				statusLines.push(paint("warning", "  ⚠ Pi 配置文件检查异常；请运行 status full"));
 			statusLines.push(
 				field("操作", paint("accent", "best  ·  next  ·  limits")),
-				paint("muted", "完整诊断  /multi-account status full"),
+				paint("muted", "完整诊断  /status full"),
 			);
 			ctx.ui.notify(statusLines.join("\n"), "info");
 			return;
@@ -8365,6 +8365,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			handler: safeHandleCommand,
 		});
 	}
+	pi.registerCommand("status", {
+		description: "Show multi-account status",
+		handler: (args: string, ctx: any) =>
+			safeHandleCommand(`status${args.trim() ? ` ${args.trim()}` : ""}`, ctx),
+	});
 
 	// ----- Anthropic OAuth out of the box -----------------------------------
 	// Enable Claude Pro/Max OAuth login on the base `anthropic` provider and shape
