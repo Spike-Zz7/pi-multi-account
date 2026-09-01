@@ -4621,8 +4621,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		ctx: any,
 		provider = ctx?.model?.provider,
 		force = false,
+		includeWhenFooterHidden = false,
 	): Promise<UsageSnapshot | undefined> {
-		if (!config.showUsage || !provider || !usageFamily(provider)) {
+		// `showUsage` controls automatic footer polling. Explicit commands can opt in below so they
+		// do not silently render an old persisted snapshot forever when the footer is disabled.
+		if (
+			(!config.showUsage && !includeWhenFooterHidden) ||
+			!provider ||
+			!usageFamily(provider)
+		) {
 			updateUsageStatus(ctx, provider);
 			return undefined;
 		}
@@ -4671,8 +4678,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * this from the status timer is cheap: network traffic occurs only when an account's own snapshot
 	 * is stale. Qwen/Cursor use honest capability-only snapshots because they expose no quota API.
 	 */
-	async function refreshRotationUsage(ctx: any, force = false) {
-		if (!config.showUsage) {
+	async function refreshRotationUsage(
+		ctx: any,
+		force = false,
+		includeWhenFooterHidden = false,
+	) {
+		// Timers respect `showUsage`; an explicitly requested status refresh does not. This keeps a
+		// hidden footer network-quiet while ensuring `/status` never presents an hour-old snapshot as
+		// live data.
+		if (!config.showUsage && !includeWhenFooterHidden) {
 			updateUsageStatus(ctx);
 			return;
 		}
@@ -4685,7 +4699,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			),
 		];
 		await Promise.all(
-			providers.map((provider) => refreshUsage(ctx, provider, force)),
+			providers.map((provider) =>
+				refreshUsage(ctx, provider, force, includeWhenFooterHidden),
+			),
 		);
 		updateUsageStatus(ctx);
 	}
@@ -7775,7 +7791,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const snapshot = await refreshUsage(ctx, provider, arg1 === "refresh");
+			const snapshot = await refreshUsage(
+				ctx,
+				provider,
+				arg1 === "refresh",
+				true,
+			);
 			const warning = usageErrors.get(provider);
 			if (!snapshot) {
 				ctx.ui.notify(
@@ -8130,6 +8151,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 
 		refreshDiscovery(false, ctx);
+		if (command === "status") {
+			// `/status` is an explicit request for the current all-account picture: query every rotation
+			// member once on every invocation, including accounts with no prior snapshot. This deliberately
+			// bypasses both the normal TTL and `showUsage`; only automatic background polling respects those.
+			await refreshRotationUsage(ctx, true, true);
+		}
 		const current = ctx.model
 			? `${ctx.model.provider}/${ctx.model.id}`
 			: "none";

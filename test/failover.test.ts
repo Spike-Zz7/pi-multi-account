@@ -200,6 +200,8 @@ function setup(opts: {
 	};
 	continueThrows?: string;
 	continueBlocks?: () => Promise<void>;
+	/** Deterministic provider response used by status; prevents unit tests from reaching the network. */
+	statusFetch?: typeof fetch;
 	omitContinueAgent?: boolean;
 	omitSendUserMessage?: boolean;
 	/** Models the HOST (Pi) itself publishes for the base Codex provider. */
@@ -555,8 +557,19 @@ function setup(opts: {
 		}
 		return result;
 	};
-	const command = async (args: string, name = "multi-account") =>
-		commands[name]?.(args, ctx);
+	const command = async (args: string, name = "multi-account") => {
+		const subcommand = args.trim().split(/\s+/, 1)[0]?.toLowerCase() || "status";
+		const invokesStatus = name === "status" ||
+			(name === "multi-account" && subcommand === "status");
+		if (!invokesStatus) return commands[name]?.(args, ctx);
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = opts.statusFetch ?? (async () => new Response("", { status: 503 }));
+		try {
+			return await commands[name]?.(args, ctx);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	};
 	const input = async (text: string, images?: any[]) =>
 		fire("input", { type: "input", text, images, source: "interactive" });
 
@@ -5851,6 +5864,113 @@ test("status is compact by default and points to full diagnostics", async () => 
 	assert.match(fullStatus, /Registered login slots/);
 	assert.match(fullStatus, /Resume watchdog/);
 });
+
+test(
+	"every status invocation refreshes all-account quota even when the footer is disabled",
+	{ concurrency: false },
+	async () => {
+		const now = Date.now();
+		const originalFetch = globalThis.fetch;
+		const fetched: string[] = [];
+		globalThis.fetch = (async (input: string | URL | Request) => {
+			const url = String(input);
+			fetched.push(url);
+			if (url.includes("chatgpt.com")) {
+				return new Response(JSON.stringify({
+					email: "fresh@example.com",
+					plan_type: "team",
+					rate_limit: {
+						allowed: true,
+						limit_reached: false,
+						primary_window: {
+							used_percent: 20,
+							reset_at: Math.floor((now + 2 * 60 * 60 * 1000) / 1000),
+						},
+						secondary_window: {
+							used_percent: 30,
+							reset_at: Math.floor((now + 5 * 24 * 60 * 60 * 1000) / 1000),
+						},
+					},
+				}), { status: 200 });
+			}
+			return new Response(JSON.stringify({
+				five_hour: {
+					utilization: 10,
+					resets_at: new Date(now + 60 * 60 * 1000).toISOString(),
+				},
+				seven_day: {
+					utilization: 15,
+					resets_at: new Date(now + 4 * 24 * 60 * 60 * 1000).toISOString(),
+				},
+			}), { status: 200 });
+		}) as typeof fetch;
+
+		const stale = now - 60 * 60 * 1000;
+		const hash = (token: string) =>
+			createHash("sha256").update(token).digest("hex").slice(0, 12);
+		const t = setup({
+			current: { provider: "openai-codex-account-2", id: "gpt-5.6-sol" },
+			config: { showUsage: false },
+			statusFetch: globalThis.fetch,
+			seedState: {
+				stateVersion: 5,
+				exhaustedUntilByProvider: {},
+				exhaustedUntilByModel: {},
+				lastProbeAtByProvider: {},
+				invalidatedByProvider: {},
+				usageByProvider: {
+					anthropic: {
+						provider: "anthropic",
+						family: "anthropic",
+						fetchedAt: stale,
+						credentialHash: hash("a-tok-1"),
+						primary: { usedPercent: 100, resetAt: now - 1 },
+					},
+					"openai-codex-account-2": {
+						provider: "openai-codex-account-2",
+						family: "codex",
+						fetchedAt: stale,
+						credentialHash: hash("c-tok-2"),
+						serviceable: false,
+						primary: { usedPercent: 100, resetAt: now - 1 },
+					},
+				},
+				lastSwitches: [],
+			},
+		});
+
+		try {
+			await t.command("status");
+			const status = t.rec.notifies.at(-1) ?? "";
+			assert.match(status, /fresh@example\.com: Team/);
+			assert.match(status, /可用.*5h 剩余 80%/);
+			assert.equal(fetched.filter((url) => url.includes("wham/usage")).length, 1);
+			assert.equal(fetched.filter((url) => url.includes("oauth/usage")).length, 1);
+
+			await t.command("limits refresh");
+			assert.match(t.rec.notifies.at(-1) ?? "", /80% left/);
+			assert.equal(
+				fetched.filter((url) => url.includes("wham/usage")).length,
+				2,
+				"an explicit active-account refresh must also work while the footer is disabled",
+			);
+
+			await t.command("status");
+			assert.equal(
+				fetched.filter((url) => url.includes("wham/usage")).length,
+				3,
+				"each status invocation must issue one new request per Codex account",
+			);
+			assert.equal(
+				fetched.filter((url) => url.includes("oauth/usage")).length,
+				2,
+				"each status invocation must issue one new request per Anthropic account",
+			);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	},
+);
 
 test("status shows how to switch to a specific account, not just next", async () => {
 	// The direct switch existed all along but was buried mid-way through one dense pipe-separated

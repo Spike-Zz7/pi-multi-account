@@ -97,8 +97,8 @@ Use `/status` for the account overview (`/status full` for complete diagnostics)
 
 | Subcommand | Description |
 |---|---|
-| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. This is also available directly as `/status`; use `/status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
-| `limits [refresh]` | Show active-account 5h/7d limits; `refresh` bypasses the cache. Aliases: `usage`, `quota`. |
+| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. Every invocation requests current quota once for every authenticated rotation account, bypassing the cache even when the footer is disabled. This is also available directly as `/status`; use `/status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
+| `limits [refresh]` | Show active-account 5h/7d limits; `refresh` bypasses the cache. This explicit query works even when `showUsage` is false. Aliases: `usage`, `quota`. |
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
 | `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |
 | `remove [anthropic\|codex\|kimi\|cursor\|ollama\|qwen\|<provider-id>]` | Remove an account from `auth.json` and rotation. Family name drops the highest numbered alias slot; a full provider id removes that exact slot. Aliases: `rm`, `delete`. |
@@ -140,7 +140,7 @@ A default config is created at `~/.pi/agent/provider-failover.json` on first run
 | `childProxy` | `true` | Serve OAuth rotation slots to processes that do not load this extension (a memory extension consolidating its notes, an external CLI, any `pi -p --no-extensions` call) through a loopback route this process owns. Without it such a child resolves the active slot by name, fails at authentication, and silently reroutes to whichever provider Pi finds first — a different account, usually a different vendor. The published route carries a non-secret placeholder; the real credential never leaves the parent. |
 | `providerOrder` | `["anthropic","openai-codex","qwen","ollama"]` | Preferred family order in the rotation. |
 | `cooldownMs` | 6 h | Default cooldown when no reset metadata is provided. |
-| `showUsage` | `true` | Show active Codex/Claude limits in Pi's footer. |
+| `showUsage` | `true` | Show active Codex/Claude limits in Pi's footer and poll them automatically. When false, the footer and background quota polling are disabled, but explicit `status`/`limits` commands can still refresh quota. |
 | `usageRefreshMs` | 5 min | Per-account usage cache TTL; every authenticated rotation account is refreshed independently, and Anthropic is clamped to at least 10 min to avoid endpoint throttling. |
 | `usageStatusRefreshMs` | 1 min | Re-render the footer and sweep idle sessions for stale usage/model catalogs; network refreshes remain limited by their five-minute (Anthropic: ten-minute) TTLs. |
 | `maxAutoContinuesPerPrompt` | `8` | Cap on auto-resume hops per task. |
