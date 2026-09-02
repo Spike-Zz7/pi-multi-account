@@ -97,7 +97,7 @@ Use `/status` for the account overview (`/status full` for complete diagnostics)
 
 | Subcommand | Description |
 |---|---|
-| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. Every invocation requests current quota once for every authenticated rotation account, bypassing the cache even when the footer is disabled. This is also available directly as `/status`; use `/status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
+| `status` (default) | Show a compact overview of the current model, limits, rotation, recovery, and actionable warnings. It refreshes every authenticated rotation account whose cache has expired (Codex: five minutes by default; Anthropic: at least ten minutes), even when the footer is disabled; repeated commands within that TTL use the cache. This is also available directly as `/status`; use `/status full` (aliases: `verbose`, `details`) for every diagnostic and registered login slot. |
 | `limits [refresh]` | Show active-account 5h/7d limits; `refresh` bypasses the cache. This explicit query works even when `showUsage` is false. Aliases: `usage`, `quota`. |
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
 | `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |

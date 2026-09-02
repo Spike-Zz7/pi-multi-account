@@ -8152,10 +8152,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 		refreshDiscovery(false, ctx);
 		if (command === "status") {
-			// `/status` is an explicit request for the current all-account picture: query every rotation
-			// member once on every invocation, including accounts with no prior snapshot. This deliberately
-			// bypasses both the normal TTL and `showUsage`; only automatic background polling respects those.
-			await refreshRotationUsage(ctx, true, true);
+			// Refresh every rotation member before composing the table, but honour the normal per-account
+			// TTL (Codex: five minutes by default; Anthropic: at least ten minutes to avoid throttling).
+			// `showUsage` only controls background polling, so an explicit status command can still refresh.
+			await refreshRotationUsage(ctx, false, true);
 		}
 		const current = ctx.model
 			? `${ctx.model.provider}/${ctx.model.id}`

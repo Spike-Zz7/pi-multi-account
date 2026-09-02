@@ -5866,7 +5866,7 @@ test("status is compact by default and points to full diagnostics", async () => 
 });
 
 test(
-	"every status invocation refreshes all-account quota even when the footer is disabled",
+	"status refreshes expired all-account quota once per TTL even when the footer is disabled",
 	{ concurrency: false },
 	async () => {
 		const now = Date.now();
@@ -5958,13 +5958,13 @@ test(
 			await t.command("status");
 			assert.equal(
 				fetched.filter((url) => url.includes("wham/usage")).length,
-				3,
-				"each status invocation must issue one new request per Codex account",
+				2,
+				"a repeated status inside the five-minute TTL must reuse the Codex cache",
 			);
 			assert.equal(
 				fetched.filter((url) => url.includes("oauth/usage")).length,
-				2,
-				"each status invocation must issue one new request per Anthropic account",
+				1,
+				"a repeated status inside the Anthropic TTL must reuse its cache",
 			);
 		} finally {
 			globalThis.fetch = originalFetch;
