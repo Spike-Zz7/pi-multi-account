@@ -51,7 +51,10 @@ import {
 	refreshCursorCredentials,
 	setupCursorSubscription,
 } from "./cursor-bridge.ts";
-import { droppedPreviousSummary, restorePreviousSummary } from "./compaction-summary.ts";
+import {
+	droppedPreviousSummary,
+	restorePreviousSummary,
+} from "./compaction-summary.ts";
 import {
 	admitRequest,
 	placeholderKeyFor,
@@ -68,7 +71,6 @@ import {
 import {
 	checkAuthShape,
 	checkModelsShape,
-	checkSettingsTracksActive,
 	describeContractDrift,
 	observedAssumptions,
 	type ShapeVerdict,
@@ -292,7 +294,8 @@ function adaptProviderFactories(
 		era: "provider-factories",
 		anthropic: {
 			login: (callbacks) => anthropicOauth.login(toAuthInteraction(callbacks)),
-			refresh: (credentials, signal) => anthropicOauth.refresh(credentials, signal),
+			refresh: (credentials, signal) =>
+				anthropicOauth.refresh(credentials, signal),
 		},
 		codex: {
 			// The flag is gone from the new shape; both eras of pi-ai's Codex flow use a
@@ -433,6 +436,7 @@ import {
 	formatResetDuration,
 	formatUsageCompact,
 	formatUsageDetails,
+	formatUsageStatus,
 	parseCodexUsageHeaders,
 	providerUsageLabel,
 	remainingPercent,
@@ -449,6 +453,7 @@ type ProviderFamily =
 	| "anthropic"
 	| "openai-codex"
 	| "kimi-coding"
+	| "antigravity"
 	| "qwen"
 	| "ollama"
 	| "cursor";
@@ -720,7 +725,9 @@ function configuredModelIds(provider: string): string[] {
 		if (Array.isArray(models)) {
 			return models
 				.map((model: any) => (typeof model === "string" ? model : model?.id))
-				.filter((id: unknown): id is string => typeof id === "string" && id.length > 0);
+				.filter(
+					(id: unknown): id is string => typeof id === "string" && id.length > 0,
+				);
 		}
 		if (models && typeof models === "object") return Object.keys(models);
 		return [];
@@ -757,7 +764,11 @@ function readHostDefaultModel(): { provider: string; id: string } | undefined {
  * different thing entirely and is reported, because a corrupt models.json is exactly how every
  * custom provider a user has disappears at once.
  */
-function readPublishedJson(path: string): { present: boolean; value?: unknown; unreadable?: string } {
+function readPublishedJson(path: string): {
+	present: boolean;
+	value?: unknown;
+	unreadable?: string;
+} {
 	let text: string;
 	try {
 		text = readFileSync(path, "utf8");
@@ -774,26 +785,13 @@ function readPublishedJson(path: string): { present: boolean; value?: unknown; u
 	}
 }
 
-/**
- * Check the published files against the shapes this extension depends on.
- *
- * `active` is supplied only once a model switch has happened in the session: before that,
- * settings.json legitimately still names the previous session's choice, and checking it would
- * report a mismatch that means nothing.
- */
-function inspectPiContract(active?: { provider: string; id: string }): ShapeVerdict[] {
+/** Check the published files against the shapes this extension depends on. */
+function inspectPiContract(): ShapeVerdict[] {
 	const verdicts: ShapeVerdict[] = [];
 	const checks: Array<[string, string, (raw: unknown) => ShapeVerdict]> = [
 		["auth.json", AUTH_PATH, checkAuthShape],
 		["models.json", MODELS_CONFIG_PATH, checkModelsShape],
 	];
-	if (active) {
-		checks.push([
-			"settings.json",
-			SETTINGS_PATH,
-			(raw) => checkSettingsTracksActive(raw, active),
-		]);
-	}
 	for (const [file, path, check] of checks) {
 		const read = readPublishedJson(path);
 		if (!read.present) continue;
@@ -824,11 +822,15 @@ function slotsAsAChildSeesThem(
 ): ChildUsability[] {
 	const read = readPublishedJson(MODELS_CONFIG_PATH);
 	const published =
-		read.present && !read.unreadable && typeof (read.value as any)?.providers === "object"
-			? ((read.value as any).providers as Record<string, any>)
+		read.present &&
+		!read.unreadable &&
+		isRecord(read.value) &&
+		isRecord(read.value.providers)
+			? read.value.providers
 			: {};
 	return slotIds.map((slotId) => {
-		const entry = published[slotId];
+		const publishedEntry = published[slotId];
+		const entry = isRecord(publishedEntry) ? publishedEntry : undefined;
 		const credentialType = auth[slotId]?.type;
 		return classifyChildUsability({
 			slotId,
@@ -839,8 +841,10 @@ function slotsAsAChildSeesThem(
 						? "api_key"
 						: "none",
 			builtin: !/-account-\d+$/.test(slotId) && entry === undefined,
-			publishedApiKey: typeof entry?.apiKey === "string" ? entry.apiKey : undefined,
-			publishedBaseUrl: typeof entry?.baseUrl === "string" ? entry.baseUrl : undefined,
+			publishedApiKey:
+				typeof entry?.apiKey === "string" ? entry.apiKey : undefined,
+			publishedBaseUrl:
+				typeof entry?.baseUrl === "string" ? entry.baseUrl : undefined,
 		});
 	});
 }
@@ -900,7 +904,8 @@ function nativeModelEntry(model: unknown): NativeModelEntry | undefined {
 	}
 	if (typeof rec.reasoning === "boolean") entry.reasoning = rec.reasoning;
 	if (rec.thinkingLevelMap && typeof rec.thinkingLevelMap === "object") {
-		entry.thinkingLevelMap = rec.thinkingLevelMap as NativeModelEntry["thinkingLevelMap"];
+		entry.thinkingLevelMap =
+			rec.thinkingLevelMap as NativeModelEntry["thinkingLevelMap"];
 	}
 	if (Array.isArray(rec.input)) {
 		const input = rec.input.filter(
@@ -924,7 +929,8 @@ function nativeModelEntry(model: unknown): NativeModelEntry | undefined {
 			};
 		}
 	}
-	if (typeof rec.contextWindow === "number") entry.contextWindow = rec.contextWindow;
+	if (typeof rec.contextWindow === "number")
+		entry.contextWindow = rec.contextWindow;
 	if (typeof rec.maxTokens === "number") entry.maxTokens = rec.maxTokens;
 	if (rec.compat && typeof rec.compat === "object") {
 		entry.compat = rec.compat as Record<string, unknown>;
@@ -949,7 +955,10 @@ function nativeModelEntries(models: unknown[]): NativeModelEntry[] {
  * Failover state lives in provider-failover-state.json, our own file.
  * Merge-only: existing user entries and unrelated keys are preserved verbatim.
  */
-function provisionNativeSlot(provider: string, entry: NativeProviderEntry): void {
+function provisionNativeSlot(
+	provider: string,
+	entry: NativeProviderEntry,
+): void {
 	try {
 		const models = nativeModelEntries(entry.models);
 		const normalized: Record<string, unknown> = {
@@ -981,11 +990,15 @@ function provisionNativeSlot(provider: string, entry: NativeProviderEntry): void
 			providers: { ...providers, [provider]: normalized },
 		};
 		const tmp = `${MODELS_CONFIG_PATH}.multi-account.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}
-`, {
-			encoding: "utf8",
-			mode: 0o600,
-		});
+		writeFileSync(
+			tmp,
+			`${JSON.stringify(next, null, 2)}
+`,
+			{
+				encoding: "utf8",
+				mode: 0o600,
+			},
+		);
 		renameSync(tmp, MODELS_CONFIG_PATH);
 	} catch {
 		/* models.json locked/corrupt — the extension registry still works */
@@ -1336,7 +1349,11 @@ export function renderHandoffRecord(
 		} else if (block.type === "thinking") {
 			// Redacted thinking is an opaque provider-encrypted payload: it cannot be
 			// replayed cross-model and has no plain text to preserve.
-			if (!block.redacted && typeof block.thinking === "string" && block.thinking.trim())
+			if (
+				!block.redacted &&
+				typeof block.thinking === "string" &&
+				block.thinking.trim()
+			)
 				thinking.push(block.thinking);
 		} else if (block.type === "toolCall") {
 			toolCalls.push(block);
@@ -1350,7 +1367,8 @@ export function renderHandoffRecord(
 		message?.provider && message?.model
 			? `${message.provider}/${message.model}`
 			: "the previous account";
-	const stopped = message?.stopReason === "aborted" ? "cancelled" : "interrupted";
+	const stopped =
+		message?.stopReason === "aborted" ? "cancelled" : "interrupted";
 	const lines: string[] = [
 		`${HANDOFF_MARKER} The turn below ran on ${ref} and was ${stopped} before it finished.`,
 		"Pi does not replay interrupted turns, so its content is reproduced here verbatim and will otherwise be lost.",
@@ -1390,7 +1408,10 @@ export function renderHandoffRecord(
 				);
 				return;
 			}
-			const body = clipHandoff(handoffBlockText(result.content), HANDOFF_MAX_RESULT);
+			const body = clipHandoff(
+				handoffBlockText(result.content),
+				HANDOFF_MAX_RESULT,
+			);
 			lines.push(
 				`   result${result.isError ? " (error)" : ""}: ${body || "<empty>"}`,
 			);
@@ -1473,6 +1494,7 @@ const DEFAULT_PROVIDER_ORDER: ProviderFamily[] = [
 	"anthropic",
 	"openai-codex",
 	"kimi-coding",
+	"antigravity",
 	"cursor",
 	"qwen",
 	"ollama",
@@ -1607,11 +1629,10 @@ const DEFAULT_CONFIG: ProviderFailoverConfig = {
 function ensureDefaultConfig() {
 	if (existsSync(CONFIG_PATH)) return;
 	mkdirSync(dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
-	writeFileSync(
-		CONFIG_PATH,
-		`${JSON.stringify(DEFAULT_CONFIG, null, "\t")}\n`,
-		{ encoding: "utf8", mode: 0o600 },
-	);
+	writeFileSync(CONFIG_PATH, `${JSON.stringify(DEFAULT_CONFIG, null, "\t")}\n`, {
+		encoding: "utf8",
+		mode: 0o600,
+	});
 }
 
 function positiveOr(value: unknown, fallback: number) {
@@ -1628,11 +1649,15 @@ function positiveOr(value: unknown, fallback: number) {
 function normalizeContextGuard(value: unknown): ContextGuardSettings {
 	const defaults = DEFAULT_CONTEXT_GUARD_SETTINGS;
 	if (value === false) return { ...defaults, enabled: false };
-	if (value === true || value === undefined || value === null) return { ...defaults };
+	if (value === true || value === undefined || value === null)
+		return { ...defaults };
 	if (typeof value !== "object") return { ...defaults };
 	const raw = value as Partial<ContextGuardSettings>;
 	const share = (candidate: unknown, fallback: number) =>
-		typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0 && candidate <= 1
+		typeof candidate === "number" &&
+		Number.isFinite(candidate) &&
+		candidate > 0 &&
+		candidate <= 1
 			? candidate
 			: fallback;
 	const settings: ContextGuardSettings = {
@@ -1640,7 +1665,10 @@ function normalizeContextGuard(value: unknown): ContextGuardSettings {
 		softPercent: share(raw.softPercent, defaults.softPercent),
 		targetPercent: share(raw.targetPercent, defaults.targetPercent),
 		compactPercent: share(raw.compactPercent, defaults.compactPercent),
-		keepVerbatimTokens: positiveOr(raw.keepVerbatimTokens, defaults.keepVerbatimTokens),
+		keepVerbatimTokens: positiveOr(
+			raw.keepVerbatimTokens,
+			defaults.keepVerbatimTokens,
+		),
 		minElideTokens: positiveOr(raw.minElideTokens, defaults.minElideTokens),
 		maxWindowTokens:
 			typeof raw.maxWindowTokens === "number" &&
@@ -1662,11 +1690,6 @@ function stringArray(value: unknown): string[] {
 		.filter((item): item is string => typeof item === "string")
 		.map((item) => item.trim())
 		.filter((item) => item.length > 0);
-}
-
-function nonEmptyStringArrayOr(value: unknown, fallback: string[]): string[] {
-	const sanitized = stringArray(value);
-	return sanitized.length > 0 ? sanitized : fallback;
 }
 
 /**
@@ -1728,6 +1751,7 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 				f === "anthropic" ||
 				f === "openai-codex" ||
 				f === "kimi-coding" ||
+				f === "antigravity" ||
 				f === "cursor" ||
 				f === "qwen" ||
 				f === "ollama",
@@ -1793,8 +1817,7 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 		contextGuard: normalizeContextGuard(raw.contextGuard),
 		continueAfterCompaction: raw.continueAfterCompaction ?? true,
 		preserveInterruptedContext: raw.preserveInterruptedContext ?? true,
-		routeCompactionToHealthyAccount:
-			raw.routeCompactionToHealthyAccount ?? true,
+		routeCompactionToHealthyAccount: raw.routeCompactionToHealthyAccount ?? true,
 		autoRecoverStuck: raw.autoRecoverStuck ?? true,
 		debugLog: raw.debugLog ?? true,
 		preferLatestModel: raw.preferLatestModel ?? true,
@@ -2042,10 +2065,10 @@ export function canPersistRefreshedCredentials(
 export async function persistRefreshedCredentials(
 	authStorage: any,
 	provider: string,
-	credential: Record<string, unknown>,
+	credential: AuthEntry,
 	io?: {
-		read?: () => Record<string, any>;
-		write?: (data: Record<string, any>) => void;
+		read?: () => Record<string, AuthEntry>;
+		write?: (data: Record<string, AuthEntry>) => void;
 	},
 ): Promise<boolean> {
 	if (typeof authStorage?.modify === "function") {
@@ -2106,18 +2129,16 @@ function getCursorSubFromAccessToken(token: string): string | undefined {
 	return typeof sub === "string" && sub.length > 0 ? sub : undefined;
 }
 
-function getCodexIdentityFromAccessToken(token: string):
-	| { accountId: string; userId?: string }
-	| undefined {
+function getCodexIdentityFromAccessToken(
+	token: string,
+): { accountId: string; userId?: string } | undefined {
 	const payload = decodeJwtPayload(token);
 	const auth = payload?.["https://api.openai.com/auth"];
 	const accountId = auth?.chatgpt_account_id;
 	if (typeof accountId !== "string" || accountId.length === 0) return undefined;
-	const userId = [
-		auth?.chatgpt_user_id,
-		auth?.user_id,
-		payload?.sub,
-	].find((value) => typeof value === "string" && value.length > 0);
+	const userId = [auth?.chatgpt_user_id, auth?.user_id, payload?.sub].find(
+		(value) => typeof value === "string" && value.length > 0,
+	);
 	return {
 		accountId,
 		...(typeof userId === "string" ? { userId } : {}),
@@ -2253,6 +2274,7 @@ function parseFamilyArg(raw: string | undefined): ProviderFamily | undefined {
 	if (familyRaw === "qwen" || familyRaw === "alibaba") return "qwen";
 	if (familyRaw === "cursor") return "cursor";
 	if (familyRaw === "kimi" || familyRaw === "kimi-coding") return "kimi-coding";
+	if (familyRaw === "antigravity" || familyRaw === "agy") return "antigravity";
 	return undefined;
 }
 
@@ -2283,12 +2305,14 @@ function resolveRemoveTarget(
 	}
 
 	const family = parseFamilyArg(trimmed);
+	if (family === "antigravity") {
+		return auth["antigravity"] ? "antigravity" : undefined;
+	}
 	if (!family) return undefined;
 
 	const aliases = Object.keys(auth)
 		.filter(
-			(id) =>
-				classifyProvider(id, qwenProvider) === family && slotIndex(id) >= 2,
+			(id) => classifyProvider(id, qwenProvider) === family && slotIndex(id) >= 2,
 		)
 		.sort((a, b) => slotIndex(b) - slotIndex(a));
 	if (aliases.length > 0) return aliases[0];
@@ -2320,6 +2344,8 @@ function classifyProvider(
 	if (isCursorProviderId(id)) return "cursor";
 	if (id === "kimi-coding" || /^kimi-coding-account-\d+$/.test(id))
 		return "kimi-coding";
+	if (id === "antigravity" || /^antigravity-account-\d+$/.test(id))
+		return "antigravity";
 	return undefined;
 }
 
@@ -2344,11 +2370,13 @@ function slotId(
 				? CODEX_BASE
 				: family === "kimi-coding"
 					? "kimi-coding"
-					: family === "qwen"
-						? qwenProvider
-						: family === "cursor"
-							? CURSOR_BASE
-							: OLLAMA_BASE;
+					: family === "antigravity"
+						? "antigravity"
+						: family === "qwen"
+							? qwenProvider
+							: family === "cursor"
+								? CURSOR_BASE
+								: OLLAMA_BASE;
 	return index <= 1 ? base : `${base}-account-${index}`;
 }
 
@@ -2458,8 +2486,7 @@ export function mergeRefreshedCredentials(credentials: any, refreshed: any) {
 		...credentials,
 		...refreshed,
 		refresh:
-			typeof refreshed?.refresh === "string" &&
-			refreshed.refresh.trim().length > 0
+			typeof refreshed?.refresh === "string" && refreshed.refresh.trim().length > 0
 				? refreshed.refresh
 				: credentials.refresh,
 	};
@@ -2492,11 +2519,53 @@ export async function refreshWithDiskRetry(opts: {
 	try {
 		return await opts.refresh(opts.credentials);
 	} catch (error) {
-		if (!/invalid_grant/i.test(String((error as any)?.message ?? error))) throw error;
+		if (!/invalid_grant/i.test(String((error as any)?.message ?? error)))
+			throw error;
 		const stored = opts.storedRefresh();
 		if (!stored || stored === opts.credentials?.refresh) throw error;
 		return await opts.refresh({ ...opts.credentials, refresh: stored });
 	}
+}
+
+const ANTIGRAVITY_CLIENT_ID = Buffer.from(
+	"MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc" +
+		"C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
+	"base64",
+).toString("utf-8");
+const ANTIGRAVITY_CLIENT_SECRET = Buffer.from(
+	"R09DU1BYLUs1OEZXUjQ" + "4NkxkTEoxbUxCOHNYQzR6NnFEQWY=",
+	"base64",
+).toString("utf-8");
+
+async function refreshAntigravityCredentials(
+	credentials: AuthEntry,
+): Promise<AuthEntry> {
+	if (!credentials.refresh)
+		throw new Error("No refresh token present for antigravity");
+	const res = await fetch("https://oauth2.googleapis.com/token", {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: new URLSearchParams({
+			client_id: ANTIGRAVITY_CLIENT_ID,
+			client_secret: ANTIGRAVITY_CLIENT_SECRET,
+			refresh_token: credentials.refresh,
+			grant_type: "refresh_token",
+		}).toString(),
+	});
+	if (!res.ok) {
+		throw new Error(`Antigravity token refresh failed: ${await res.text()}`);
+	}
+	const data = (await res.json()) as {
+		access_token: string;
+		expires_in: number;
+		refresh_token?: string;
+	};
+	return {
+		...credentials,
+		access: data.access_token,
+		refresh: data.refresh_token || credentials.refresh,
+		expires: Date.now() + (data.expires_in ?? 3600) * 1000 - 5 * 60 * 1000,
+	};
 }
 
 /** The refresh token currently stored on disk for a slot — whoever wrote it last wins. */
@@ -2574,7 +2643,10 @@ function codexOAuthOverride(providerId: string, name: string) {
 			return tryLoadPiAiOauth()?.codex.usesCallbackServer ?? true;
 		},
 		async login(callbacks: any) {
-			return rejectDuplicateLogin(providerId, await getProvider().login(callbacks));
+			return rejectDuplicateLogin(
+				providerId,
+				await getProvider().login(callbacks),
+			);
 		},
 		async refreshToken(credentials: any, signal?: AbortSignal) {
 			return getProvider().refresh(credentials, oauthRefreshSignal(signal));
@@ -2588,7 +2660,9 @@ function codexOAuthOverride(providerId: string, name: string) {
 function registerCodexSlot(
 	pi: ExtensionAPI,
 	id: string,
-	models: Array<Record<string, unknown>> = DEFAULT_CODEX_MODELS.map(codexModelDef),
+	models: Array<Record<string, unknown>> = DEFAULT_CODEX_MODELS.map(
+		codexModelDef,
+	),
 ) {
 	if (id === CODEX_BASE) return; // base provider is native until live catalog sync enriches it
 	pi.registerProvider(id, {
@@ -2666,7 +2740,10 @@ function kimiOAuthOverride(providerId: string, name: string) {
 		name,
 		isSubscription: true,
 		async login(callbacks: any) {
-			return rejectDuplicateLogin(providerId, await getProvider().login(callbacks));
+			return rejectDuplicateLogin(
+				providerId,
+				await getProvider().login(callbacks),
+			);
 		},
 		async refreshToken(credentials: any, signal?: AbortSignal) {
 			return getProvider().refresh(credentials, oauthRefreshSignal(signal));
@@ -2697,13 +2774,6 @@ function registerKimiSlot(
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1";
 
-// Ollama Cloud accepts both the canonical bare id (`kimi-k3`, `glm-5.2`) returned by
-// /v1/models and the legacy `:cloud`-suffixed form, so the suffix is display-only now.
-// Every managed Ollama provider (base + cloned slots) is registered against the Cloud
-// endpoint, so all of its models route there regardless of suffix.
-function isOllamaCloudModel(modelId: string): boolean {
-	return modelId.includes(":cloud");
-}
 const OLLAMA_MODEL_DEFS: Record<string, Record<string, unknown>> = {
 	"glm-5.2:cloud": {
 		id: "glm-5.2:cloud",
@@ -2809,7 +2879,10 @@ function hostModelIdsFor(ctx: any, baseProvider: string): string[] {
 	try {
 		const all = ctx?.modelRegistry?.getAll?.() ?? [];
 		return all
-			.filter((model: any) => model?.provider === baseProvider && typeof model?.id === "string")
+			.filter(
+				(model: any) =>
+					model?.provider === baseProvider && typeof model?.id === "string",
+			)
 			.map((model: any) => model.id);
 	} catch {
 		return [];
@@ -2872,8 +2945,7 @@ function patternMatch(text: string, patterns: string[]) {
 function retryAfterToMs(value: string | undefined) {
 	if (!value) return undefined;
 	const seconds = Number(value);
-	if (Number.isFinite(seconds) && seconds >= 0)
-		return Math.ceil(seconds * 1000);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
 	const dateMs = Date.parse(value);
 	if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
 	return undefined;
@@ -2983,9 +3055,7 @@ function cooldownFromErrorText(errorText: string) {
 	);
 	const primaryReset = firstDefinedMs([
 		secondsToMs(
-			errorText.match(
-				/"X-Codex-Primary-Reset-After-Seconds"\s*:\s*"?(\d+)/i,
-			)?.[1],
+			errorText.match(/"X-Codex-Primary-Reset-After-Seconds"\s*:\s*"?(\d+)/i)?.[1],
 		),
 		unixSecondsToCooldownMs(
 			errorText.match(/"X-Codex-Primary-Reset-At"\s*:\s*"?(\d+)/i)?.[1],
@@ -3184,10 +3254,7 @@ function buildBillingHeaderValue(
 ): string | undefined {
 	const messageText = getFirstUserText(messages);
 	if (!messageText) return undefined;
-	const cch = createHash("sha256")
-		.update(messageText)
-		.digest("hex")
-		.slice(0, 5);
+	const cch = createHash("sha256").update(messageText).digest("hex").slice(0, 5);
 	const sampledCharacters = BILLING_HEADER_POSITIONS.map(
 		(index) => messageText[index] || "0",
 	).join("");
@@ -3210,10 +3277,10 @@ function normalizeSystemBlock(block: unknown): ShapeTextBlock {
 	return { type: "text", text: "" };
 }
 
-function prependBillingHeader(
-	system: unknown,
+function prependBillingHeader<T>(
+	system: T,
 	messages: ShapeMessageParam[],
-): unknown {
+): T | ShapeTextBlock[] {
 	const billingHeader = buildBillingHeaderValue(messages);
 	if (!billingHeader) return system;
 	const systemBlocks = Array.isArray(system)
@@ -3311,7 +3378,7 @@ function shapeSystemBlocks(blocks: ShapeTextBlock[]): ShapeTextBlock[] {
 }
 
 /** before_provider_request shaper: makes Claude Pro/Max OAuth requests acceptable. */
-function shapeAnthropicOAuthPayload(payload: unknown): unknown {
+function shapeAnthropicOAuthPayload<T>(payload: T): T | ShapeAnthropicPayload {
 	if (!isAnthropicMessagesPayload(payload)) return payload;
 	const messages = payload.messages as ShapeMessageParam[];
 	if (!isOAuthAnthropicPayload(payload)) return payload; // API-key / non-OAuth → untouched
@@ -3432,7 +3499,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	function clearOnlyActiveFilter() {
-		for (const provider of [...hiddenProviderModels.keys()]) unhideProvider(provider);
+		for (const provider of [...hiddenProviderModels.keys()])
+			unhideProvider(provider);
 	}
 
 	/**
@@ -3484,11 +3552,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	/** pi.setModel that first restores the target's models when the filter hid them. */
 	async function setModelEnsuringVisible(
 		target: { provider: string; id: string },
-		ctx: any,
+		_ctx: any,
 	) {
 		if (onlyActiveModels) unhideProvider(target.provider);
-		// Pi rewrites settings.json on this path; the next turn checks that it actually did.
-		pendingSettingsCheck = true;
 		return pi.setModel(target as any);
 	}
 
@@ -3497,7 +3563,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * own candidate search would starve: a hidden provider shows zero models, so the
 	 * rotation could never switch INTO it.
 	 */
-	function findModelIncludingHidden(ctx: any, provider: string, modelId: string) {
+	function findModelIncludingHidden(
+		ctx: any,
+		provider: string,
+		modelId: string,
+	) {
 		const direct =
 			ctx.modelRegistry.find(provider, modelId) ??
 			hiddenProviderModels.get(provider)?.find((m: any) => m.id === modelId);
@@ -3701,15 +3771,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	let stuckReminders = 0;
 	// True only while WE deliberately abort a wedged resumed turn, so agent_end can tell our
 	// recovery abort apart from a real user Esc and auto-continue instead of stopping.
-	/**
-	 * Set on every model switch, cleared once the next turn has verified it.
-	 *
-	 * Before the first switch, settings.json still names the previous session's choice, so
-	 * comparing it to the live model would report a mismatch that means nothing. After a switch
-	 * the comparison is meaningful: Pi is supposed to have rewritten both keys, and everything
-	 * spawned without this extension loaded reads them to find the active account.
-	 */
-	let pendingSettingsCheck = false;
 	/** Contract drift is stated once per session — it is a standing condition, not an event. */
 	let contractDriftAnnounced = false;
 	/** Last contract verdicts, for the status line. */
@@ -3826,17 +3887,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	// (deduped, so a repeating fault can't spam) and swallowed, the current failover
 	// step is skipped, and Pi keeps running. This is the systemic net that makes the
 	// whole surface fail-safe — not just the specific bugs we already know about.
-	const reportedErrors = new Map<string, number>();
+	const reportedErrors = new Set<string>();
 	function reportExtensionError(where: string, error: unknown, ctx?: any) {
 		const msg = error instanceof Error ? error.message : String(error);
 		const key = `${where}:${msg.slice(0, 80)}`;
-		const now = Date.now();
-		const last = reportedErrors.get(key) ?? 0;
 		// Always record the raw fault in the black box (deduped only for the user-facing toast).
 		logEvent("internal_error", { where, error: msg });
-		if (now - last < 30_000) return; // dedupe identical errors within 30s
-		reportedErrors.set(key, now);
-		if (reportedErrors.size > 50) reportedErrors.clear(); // never grow unbounded
+		if (reportedErrors.has(key)) return;
+		// Bound both memory and UI noise: after the first 50 distinct faults, the black box remains
+		// the diagnostic surface instead of turning every novel failure into another toast.
+		if (reportedErrors.size >= 50) return;
+		reportedErrors.add(key);
 		try {
 			ctx?.ui?.notify?.(
 				`pi-multi-account: recovered from an internal error in ${where} (${msg.slice(0, 140)}). Failover continues; run /multi-account status if anything looks off.`,
@@ -3858,16 +3919,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * Neither auth.json nor models.json carries a schema version, so a Pi upgrade can change
 	 * either without anything announcing it — both breakages this extension has already lived
 	 * through were silent for days. Looking is the only detection available.
-	 *
-	 * `includeSettings` is true only on the turn after a model switch, when settings.json is
-	 * supposed to have been rewritten to name the account the rotation just chose.
 	 */
-	function checkPiContract(ctx: any, why: string, includeSettings = false) {
-		const active =
-			includeSettings && ctx?.model?.provider && ctx?.model?.id
-				? { provider: ctx.model.provider as string, id: ctx.model.id as string }
-				: undefined;
-		const verdicts = inspectPiContract(active);
+	function checkPiContract(ctx: any, why: string) {
+		const verdicts = inspectPiContract();
 		lastContractVerdicts = verdicts;
 		const drift = describeContractDrift(verdicts);
 		// A healthy check is logged once, at session start; after that only faults are worth a
@@ -3928,12 +3982,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			exhaustedUntilByProvider: Object.fromEntries(
 				exhaustedUntilByProvider.entries(),
 			),
-			exhaustedUntilByModel: Object.fromEntries(
-				exhaustedUntilByModel.entries(),
-			),
-			invalidatedByProvider: Object.fromEntries(
-				invalidatedByProvider.entries(),
-			),
+			exhaustedUntilByModel: Object.fromEntries(exhaustedUntilByModel.entries()),
+			invalidatedByProvider: Object.fromEntries(invalidatedByProvider.entries()),
 			usageUntrustedUntilByProvider: Object.fromEntries(
 				usageUntrustedUntilByProvider.entries(),
 			),
@@ -4043,11 +4093,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		try {
 			let refreshed: AuthEntry | undefined;
 			if (family === "anthropic") {
-				refreshed = await refreshAnthropicCredentials(
-					entry,
-					undefined,
-					provider,
-				);
+				refreshed = await refreshAnthropicCredentials(entry, undefined, provider);
 			} else if (family === "openai-codex") {
 				refreshed = mergeRefreshedCredentials(
 					entry,
@@ -4060,6 +4106,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				refreshed = mergeRefreshedCredentials(
 					entry,
 					await refreshCursorCredentials(entry.refresh),
+				);
+			} else if (family === "antigravity") {
+				refreshed = mergeRefreshedCredentials(
+					entry,
+					await refreshAntigravityCredentials(entry),
 				);
 			} else {
 				return { status: "unsupported" };
@@ -4110,9 +4161,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	function registryCodexModels(ctx: any): CodexCatalogModel[] {
 		let models: any[] = [];
 		try {
-			models = ctx?.modelRegistry
-				?.getAll?.()
-				?.filter((model: any) => model?.provider === CODEX_BASE) ?? [];
+			models =
+				ctx?.modelRegistry
+					?.getAll?.()
+					?.filter((model: any) => model?.provider === CODEX_BASE) ?? [];
 		} catch {
 			return [];
 		}
@@ -4128,8 +4180,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				id: model.id,
 				name: typeof model.name === "string" ? model.name : model.id,
 				reasoning: model.reasoning !== false,
-				...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
-				input: Array.isArray(model.input) && model.input.length > 0 ? model.input : ["text"],
+				...(model.thinkingLevelMap
+					? { thinkingLevelMap: model.thinkingLevelMap }
+					: {}),
+				input:
+					Array.isArray(model.input) && model.input.length > 0
+						? model.input
+						: ["text"],
 				cost:
 					model.cost && typeof model.cost === "object"
 						? model.cost
@@ -4140,10 +4197,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			})) as CodexCatalogModel[];
 	}
 
-	function mergeCodexModels(...groups: CodexCatalogModel[][]): CodexCatalogModel[] {
+	function mergeCodexModels(
+		...groups: CodexCatalogModel[][]
+	): CodexCatalogModel[] {
 		const byId = new Map<string, CodexCatalogModel>();
 		for (const group of groups) {
-			for (const model of group) if (!byId.has(model.id)) byId.set(model.id, model);
+			for (const model of group)
+				if (!byId.has(model.id)) byId.set(model.id, model);
 		}
 		return [...byId.values()].sort(compareCodexModelStrength);
 	}
@@ -4155,24 +4215,37 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const auth = readAuthFile();
 		const byProvider = new Map<string, any[]>();
 		const put = (model: any) => {
-			if (!model || typeof model.provider !== "string" || typeof model.id !== "string" || !auth[model.provider]) return;
+			if (
+				!model ||
+				typeof model.provider !== "string" ||
+				typeof model.id !== "string" ||
+				!auth[model.provider]
+			)
+				return;
 			const list = byProvider.get(model.provider) ?? [];
 			if (!list.some((entry) => entry.id === model.id)) list.push(model);
 			byProvider.set(model.provider, list);
 		};
 		try {
 			for (const model of ctx?.modelRegistry?.getAll?.() ?? []) put(model);
-		} catch { /* runtime catalog is best effort; hidden/live snapshots follow */ }
-		for (const models of hiddenProviderModels.values()) for (const model of models) put(model);
+		} catch {
+			/* runtime catalog is best effort; hidden/live snapshots follow */
+		}
+		for (const models of hiddenProviderModels.values())
+			for (const model of models) put(model);
 		for (const [provider, snapshot] of codexModelCatalogByProvider) {
 			if (!auth[provider] || !snapshot.models.length) continue;
-			const template = byProvider.get(provider)?.[0] ?? byProvider.get(CODEX_BASE)?.[0] ?? {};
-			byProvider.set(provider, snapshot.models.map((model) => ({
-				...model,
+			const template =
+				byProvider.get(provider)?.[0] ?? byProvider.get(CODEX_BASE)?.[0] ?? {};
+			byProvider.set(
 				provider,
-				api: template.api ?? "openai-codex-responses",
-				baseUrl: template.baseUrl,
-			})));
+				snapshot.models.map((model) => ({
+					...model,
+					provider,
+					api: template.api ?? "openai-codex-responses",
+					baseUrl: template.baseUrl,
+				})),
+			);
 		}
 		const models = [...byProvider]
 			.sort(([left], [right]) => left.localeCompare(right))
@@ -4191,7 +4264,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		pi.events?.emit?.(MODEL_CATALOG_SNAPSHOT_EVENT, { schemaVersion: 1, models });
 	}
 
-	pi.events?.on?.(MODEL_CATALOG_REQUEST_EVENT, () => emitModelCatalogSnapshot(modelCatalogContext));
+	pi.events?.on?.(MODEL_CATALOG_REQUEST_EVENT, () =>
+		emitModelCatalogSnapshot(modelCatalogContext),
+	);
 
 	/**
 	 * Offline Codex ordering: everything the HOST (Pi) knows about the Codex provider, merged
@@ -4231,7 +4306,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// Alias slots are registered from the static list, so a model only the host knows about
 		// would not be selectable on them even once it is ranked first.
 		for (const provider of registeredSlots) {
-			if (classifyProvider(provider, config.qwenProvider) !== "anthropic") continue;
+			if (classifyProvider(provider, config.qwenProvider) !== "anthropic")
+				continue;
 			registerAnthropicSlot(pi, provider, ranked);
 		}
 	}
@@ -4248,7 +4324,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// would not be selectable on them. Re-register — but never over a live catalog, which is
 		// authoritative for that specific account.
 		for (const provider of registeredSlots) {
-			if (classifyProvider(provider, config.qwenProvider) !== "openai-codex") continue;
+			if (classifyProvider(provider, config.qwenProvider) !== "openai-codex")
+				continue;
 			if (
 				config.autoDiscoverModels &&
 				codexModelCatalogByProvider.get(provider)?.models.length
@@ -4263,7 +4340,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		provider: string,
 	): Promise<CodexCatalogModel[]> {
 		let entry = readAuthFile()[provider];
-		if (!entry) throw new CodexCatalogFetchError(`${provider} has no stored credential`);
+		if (!entry)
+			throw new CodexCatalogFetchError(`${provider} has no stored credential`);
 		const runFetch = () =>
 			fetchCodexModelCatalog(entry, { clientVersion: VERSION });
 		try {
@@ -4348,9 +4426,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// Also keep unauthenticated spare login slots current so a newly logged-in account can select
 		// the new flagship before the next restart/session refresh.
 		for (const provider of registeredSlots) {
-			if (classifyProvider(provider, config.qwenProvider) !== "openai-codex") continue;
+			if (classifyProvider(provider, config.qwenProvider) !== "openai-codex")
+				continue;
 			if (providers.includes(provider)) continue;
-			registerCodexCatalog(pi, provider, allKnown as Array<Record<string, unknown>>);
+			registerCodexCatalog(
+				pi,
+				provider,
+				allKnown as Array<Record<string, unknown>>,
+			);
 		}
 		if (changed) persist();
 		emitModelCatalogSnapshot(ctx);
@@ -4393,8 +4476,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (!key) return; // no credential → nothing to discover, configured ids still serve
 		if (
 			!force &&
-				ollamaCatalogFetchedAt &&
-				Date.now() - ollamaCatalogFetchedAt < OLLAMA_MODEL_CATALOG_TTL_MS
+			ollamaCatalogFetchedAt &&
+			Date.now() - ollamaCatalogFetchedAt < OLLAMA_MODEL_CATALOG_TTL_MS
 		) {
 			return;
 		}
@@ -4412,7 +4495,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			});
 			return; // keep the previous (or empty) discovered set; configured ids still serve
 		}
-		const models = ollamaRotationModelIds().map((m) => ollamaModelDef(m, OLLAMA_BASE));
+		const models = ollamaRotationModelIds().map((m) =>
+			ollamaModelDef(m, OLLAMA_BASE),
+		);
 		pi.registerProvider(OLLAMA_BASE, {
 			name: "Ollama",
 			baseUrl: OLLAMA_CLOUD_BASE_URL,
@@ -4433,7 +4518,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				baseUrl: OLLAMA_CLOUD_BASE_URL,
 				api: "openai-completions" as any,
 				apiKey: slotKey,
-				models: ollamaRotationModelIds().map((m) => ollamaModelDef(m, provider)) as any,
+				models: ollamaRotationModelIds().map((m) =>
+					ollamaModelDef(m, provider),
+				) as any,
 			} as any);
 		}
 		// Same repair as the Codex sync: keep only-active hidden copies fresh immediately.
@@ -4530,8 +4617,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			}
 			const display = displayUsageSnapshot(snapshot);
 			const spare = readyElsewhereCount(ctx, provider);
-			const text = `${formatUsageCompact(display)} | ${
-				spare > 0 ? `+${spare} ready` : "no spare"
+			const text = `${formatUsageStatus(display)} · ${
+				spare > 0 ? `+${spare}` : "no spare"
 			}`;
 			const color =
 				snapshot.family === "qwen"
@@ -4594,8 +4681,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		provider: string,
 	): Promise<UsageSnapshot> {
 		let entry = readAuthFile()[provider];
-		if (!entry)
-			throw new UsageFetchError(`${provider} has no stored credential`);
+		if (!entry) throw new UsageFetchError(`${provider} has no stored credential`);
 		const runFetch = () =>
 			fetchUsageSnapshot(provider, entry, {
 				credentialHash: credentialHash(entry),
@@ -4798,10 +4884,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const distinct = (prev?.distinct ?? 0) + 1;
 		if (distinct >= MAX_CONSECUTIVE_AUTH_FAILURES) {
 			authFailures.delete(provider);
-			markInvalid(
-				provider,
-				`${reason} (after ${distinct} refreshed-token 401s)`,
-			);
+			markInvalid(provider, `${reason} (after ${distinct} refreshed-token 401s)`);
 			return true;
 		}
 		authFailures.set(provider, { hash, distinct });
@@ -4966,8 +5049,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// provider. A session/rate-limited account keeps 429ing while its quota window shows
 			// headroom; once that has been proven (usageUntrusted), we respect the recorded cooldown
 			// (`at`) instead of falsely reporting "recovered now" and hot-looping a ~1s retry.
-			if (fresh && usageMs === 0)
-				return usageUntrusted(provider, now) ? at : now;
+			if (fresh && usageMs === 0) return usageUntrusted(provider, now) ? at : now;
 		}
 		return at;
 	}
@@ -5047,9 +5129,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const hintedCooldowns = [
 			responseCooldownHints.get(provider),
 			statedMs,
-		].filter(
-			(value): value is number => typeof value === "number" && value > 0,
-		);
+		].filter((value): value is number => typeof value === "number" && value > 0);
 		const snapshot = await refreshUsage(ctx, provider, true);
 		if (snapshot) {
 			applyUsageToCooldown(provider, snapshot, now);
@@ -5081,9 +5161,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 	function providersSharingAccount(provider: string): string[] {
 		const auth = readAuthFile();
-		const identity = auth[provider]
-			? accountIdentity(auth[provider])
-			: undefined;
+		const identity = auth[provider] ? accountIdentity(auth[provider]) : undefined;
 		if (!identity) return [provider];
 		const shared = Object.keys(auth).filter((p) => {
 			const e = auth[p];
@@ -5227,6 +5305,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			anthropic: [],
 			"openai-codex": [],
 			"kimi-coding": [],
+			antigravity: [],
 			cursor: [],
 			qwen: [],
 			ollama: [],
@@ -5280,9 +5359,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 	/** Rotation members this extension carries but cannot measure — no quota endpoint, no OAuth. */
 	function unmanagedRotationMembers(): string[] {
-		return rotation.filter(
-			(id) => !classifyProvider(id, config.qwenProvider),
-		);
+		return rotation.filter((id) => !classifyProvider(id, config.qwenProvider));
 	}
 
 	/**
@@ -5339,9 +5416,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			...new Set([
 				...Object.keys(auth).filter(
 					(id) =>
-						isCursorProviderId(id) &&
-						id !== CURSOR_BASE &&
-						isEntryUsable(auth[id]),
+						isCursorProviderId(id) && id !== CURSOR_BASE && isEntryUsable(auth[id]),
 				),
 				...[...registeredSlots].filter(
 					(id) => isCursorProviderId(id) && id !== CURSOR_BASE,
@@ -5437,8 +5512,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				family === "cursor"
 			) {
 				let spare = 2;
-				while (wanted.has(spare) && spare <= config.maxAccountsPerProvider)
-					spare++;
+				while (wanted.has(spare) && spare <= config.maxAccountsPerProvider) spare++;
 				if (spare <= config.maxAccountsPerProvider) wanted.add(spare);
 			}
 			for (const index of wanted) {
@@ -5523,11 +5597,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// is unchanged, so its rate-limit cooldown MUST survive. Only drop the cooldown when the
 			// slot is re-logged into a DIFFERENT real account (stable fingerprint changed) — a token
 			// rotation never lifts a server-side limit.
-			if (
-				previousIdentity &&
-				nextIdentity &&
-				nextIdentity !== previousIdentity
-			) {
+			if (previousIdentity && nextIdentity && nextIdentity !== previousIdentity) {
 				if (exhaustedUntilByProvider.delete(provider)) cooldownsCleared = true;
 				// Model availability is account/plan-specific. Never let a newly logged-in account
 				// inherit the previous account's five-minute catalog snapshot for this slot.
@@ -5554,9 +5624,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				usageByProvider.delete(provider);
 				usageErrors.delete(provider);
 				const refreshable =
-					!!entry &&
-					typeof entry.refresh === "string" &&
-					entry.refresh.length > 0;
+					!!entry && typeof entry.refresh === "string" && entry.refresh.length > 0;
 				if (!refreshable) authFailures.delete(provider);
 			}
 			if (nextHash) credentialHashes.set(provider, nextHash);
@@ -5786,8 +5854,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// same account's older gpt-5.4 (lower rotIndex) instead of gpt-5.5 on a healthy
 		// account, silently downgrading the model. rank is the primary tiebreak.
 		const byRankThenRot = (a: Scored, b: Scored) =>
-			(config.preferLatestModel ? a.rank - b.rank : 0) ||
-			a.rotIndex - b.rotIndex;
+			(config.preferLatestModel ? a.rank - b.rank : 0) || a.rotIndex - b.rotIndex;
 		const scored: Scored[] = [];
 		const seen = new Set<string>();
 
@@ -5821,8 +5888,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				options.preferSameIdentity !== false && sameFamily && currentId
 					? models.find(
 							(model: any) =>
-								notModelCooled(model) &&
-								sameModelIdentity(model.id, currentId),
+								notModelCooled(model) && sameModelIdentity(model.id, currentId),
 						)
 					: undefined;
 			let pick = flagshipPick;
@@ -5869,8 +5935,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				lastRefusalAt: limitStreakByProvider.get(pick.provider)?.lastAt ?? 0,
 				confirmed: isConfirmedAvailable(pick.provider, now),
 				predictedBusy:
-					providerRecoveryAt(pick.provider, now, { ignoreCeiling: true }) >
-					now,
+					providerRecoveryAt(pick.provider, now, { ignoreCeiling: true }) > now,
 				group,
 				sameFamily: !!currentGroup && group === currentGroup,
 				sameModel:
@@ -5894,9 +5959,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					)
 				: -1;
 			const forwardDistance = (rotIndex: number) =>
-				currentRotIndex < 0
-					? rotIndex
-					: (rotIndex - currentRotIndex + n) % n || n;
+				currentRotIndex < 0 ? rotIndex : (rotIndex - currentRotIndex + n) % n || n;
 			const byDistance = (a: Scored, b: Scored) =>
 				forwardDistance(a.rotIndex) - forwardDistance(b.rotIndex);
 			let ordered = [...scored].sort(byDistance);
@@ -5976,9 +6039,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 		if (options.availableNowOnly) return [];
 		return scored
-			.sort(
-				(a, b) => a.remaining - b.remaining || byRefusalAgeThenRank(a, b),
-			)
+			.sort((a, b) => a.remaining - b.remaining || byRefusalAgeThenRank(a, b))
 			.map((s) => s.model);
 	}
 
@@ -6017,7 +6078,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		sourceModel: any,
 		candidates: any[],
 		reason: string,
-		options: { armContinuation?: boolean } = {},
+		options: { armContinuation?: boolean; announceSwitch?: boolean } = {},
 	) {
 		const from =
 			sourceModel?.provider && sourceModel?.id
@@ -6043,8 +6104,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				} catch {
 					ok = false;
 				}
-				if (!ok && automaticModelTarget === to)
-					automaticModelTarget = undefined;
+				if (!ok && automaticModelTarget === to) automaticModelTarget = undefined;
 			}
 			if (!ok) {
 				reloadHostAuth(ctx);
@@ -6056,8 +6116,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					} catch {
 						ok = false;
 					}
-					if (!ok && automaticModelTarget === to)
-						automaticModelTarget = undefined;
+					if (!ok && automaticModelTarget === to) automaticModelTarget = undefined;
 				}
 			}
 			if (!ok) {
@@ -6079,20 +6138,18 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				pinFailoverProbe(fallback.provider);
 			}
 			const record = { from, to, reason, at: Date.now() };
-			currentPromptSwitch =
-				options.armContinuation === false ? undefined : record;
+			currentPromptSwitch = options.armContinuation === false ? undefined : record;
 			logEvent("switch", { from, to, reason });
 			pi.appendEntry("provider-failover", record);
 			persist({
-				lastSwitches: [record, ...(persistedState.lastSwitches ?? [])].slice(
-					0,
-					20,
-				),
+				lastSwitches: [record, ...(persistedState.lastSwitches ?? [])].slice(0, 20),
 			});
-			ctx.ui.notify(
-				`Provider failover [v${VERSION}]: ${from} → ${to} (${reason})`,
-				"warning",
-			);
+			if (options.announceSwitch !== false) {
+				ctx.ui.notify(
+					`Provider failover [v${VERSION}]: ${from} → ${to} (${reason})`,
+					"warning",
+				);
+			}
 			return true;
 		}
 		return false;
@@ -6173,7 +6230,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			failedModel,
 			candidates,
 			reason,
-			{ armContinuation: !options.manual },
+			{
+				armContinuation: !options.manual,
+				announceSwitch: !options.manual,
+			},
 		);
 		if (!switched && !options.manual && config.autoContinue) {
 			if (!armSameAccountResumeIfReady(ctx, failedModel, reason, options))
@@ -6220,7 +6280,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		);
 	}
 
-	function rememberUserModel(model: { provider?: string; id?: string } | undefined) {
+	function rememberUserModel(
+		model: { provider?: string; id?: string } | undefined,
+	) {
 		if (!model?.provider || !model?.id) return;
 		const family = classifyProvider(model.provider, config.qwenProvider);
 		if (family) lastModelByFamily[family] = model.id;
@@ -6244,8 +6306,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			return false;
 		}
 		const alreadyThere =
-			ctx.model?.provider === intended.provider &&
-			ctx.model?.id === intended.id;
+			ctx.model?.provider === intended.provider && ctx.model?.id === intended.id;
 		if (alreadyThere) {
 			restoreDesiredThinking(ctx);
 			return true;
@@ -6253,11 +6314,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (cursorReady) {
 			await cursorReady.catch(() => undefined);
 		}
-		let found = findModelIncludingHidden(
-			ctx,
-			intended.provider,
-			intended.id,
-		);
+		let found = findModelIncludingHidden(ctx, intended.provider, intended.id);
 		if (!found || !providerHasUsableAuth(ctx, intended.provider)) {
 			logEvent("remembered_model_unavailable", {
 				provider: intended.provider,
@@ -6526,10 +6583,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// A wedge is a failed recovery — feed the circuit breaker so repeated wedges drop us
 			// to advisory mode instead of aborting/re-resuming forever.
 			noteRecoveryFailure(ctx);
-			if (
-				config.autoRecoverStuck !== false &&
-				typeof ctx?.abort === "function"
-			) {
+			if (config.autoRecoverStuck !== false && typeof ctx?.abort === "function") {
 				ctx?.ui?.notify?.(
 					`Provider failover [v${VERSION}]: the resumed turn on ${where} has been silent for ${formatDelay(silentMs)} — auto-cancelling it and will resume automatically when an account is free${recovery}. (/multi-account stop to cancel, /multi-account status to inspect.)`,
 					"warning",
@@ -6607,10 +6661,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}).filter(
 			(model: any) =>
 				model &&
-				!(
-					model.provider === ctx.model?.provider &&
-					model.id === ctx.model?.id
-				),
+				!(model.provider === ctx.model?.provider && model.id === ctx.model?.id),
 		);
 	}
 
@@ -6639,9 +6690,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					"Provider failover: no live account can summarize; cancelled instead of hanging on the spent account.",
 					"warning",
 				);
-				return compactionCancelled(
-					"no live account for compaction; cancelled",
-				);
+				return compactionCancelled("no live account for compaction; cancelled");
 			}
 			let thinkingLevel: any;
 			try {
@@ -6661,8 +6710,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					continue;
 				}
 				const isCurrent =
-					model.provider === ctx.model?.provider &&
-					model.id === ctx.model?.id;
+					model.provider === ctx.model?.provider && model.id === ctx.model?.id;
 				if (!isCurrent) {
 					ctx.ui?.notify?.(
 						`Provider failover: ${ctx.model?.provider ?? "active"} account is unavailable for compaction; summarizing on ${model.provider} instead.`,
@@ -6749,18 +6797,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					"Provider failover: the spent account cannot compact and this Pi build cannot reroute the summary; cancelled instead of hanging.",
 					"warning",
 				);
-				return compactionCancelled(
-					"cannot route compaction on this host",
-				);
+				return compactionCancelled("cannot route compaction on this host");
 			}
 			const detail = tried.join("; ") || "no candidates";
 			ctx.ui?.notify?.(
 				`Provider failover: could not finish compaction on any live account (${detail.slice(0, 140)}); cancelled instead of hanging on the spent one.`,
 				"warning",
 			);
-			return compactionCancelled(
-				"healthy-account compaction failed; cancelled",
-			);
+			return compactionCancelled("healthy-account compaction failed; cancelled");
 		} catch (error) {
 			logEvent("compaction_failed", { error: String(error) });
 			if (event?.signal?.aborted) {
@@ -6813,9 +6857,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 		const to =
 			currentPromptSwitch?.to ??
-			(ctx.model
-				? ref(ctx.model.provider, ctx.model.id)
-				: "the active account");
+			(ctx.model ? ref(ctx.model.provider, ctx.model.id) : "the active account");
 		const prompt = config.continuationPrompt
 			.replaceAll("{from}", String(source?.from ?? "the previous account"))
 			.replaceAll("{to}", String(to))
@@ -6882,9 +6924,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// fallback itself refused.
 			ctx.ui.notify(
 				`Provider failover [v${VERSION}]: could not auto-resume this turn; send your message to continue on ${
-					ctx.model
-						? ref(ctx.model.provider, ctx.model.id)
-						: "the active account"
+					ctx.model ? ref(ctx.model.provider, ctx.model.id) : "the active account"
 				}. Run /multi-account status for the reason.`,
 				"warning",
 			);
@@ -6990,8 +7030,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		reconcileCooldownsFromUsage(ctx);
 		pruneCooldowns();
 		if (!isCurrentModelReady(ctx)) {
-			const failed =
-				ctx.model?.provider && ctx.model?.id ? ctx.model : undefined;
+			const failed = ctx.model?.provider && ctx.model?.id ? ctx.model : undefined;
 			if (failed && config.autoContinue) {
 				setPendingContinuation(
 					ctx,
@@ -7043,9 +7082,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const now = Date.now();
 		const providers = pendingWakeProviders();
 		if (providers.length === 0) return undefined;
-		const nextAt = Math.min(
-			...providers.map((p) => providerRecoveryAt(p, now)),
-		);
+		const nextAt = Math.min(...providers.map((p) => providerRecoveryAt(p, now)));
 		return Math.max(MIN_PENDING_WAKE_MS, nextAt - now);
 	}
 
@@ -7067,9 +7104,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		pendingWakeTimer = setTimeout(
 			() => {
 				pendingWakeTimer = undefined;
-				runBackground("pending auto-resume", ctx, () =>
-					attemptPendingResume(ctx),
-				);
+				runBackground("pending auto-resume", ctx, () => attemptPendingResume(ctx));
 			},
 			Math.min(delay, config.pendingPollMs),
 		);
@@ -7382,9 +7417,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			if (diagnostic?.error?.code !== undefined)
 				parts.push(String(diagnostic.error.code));
 		}
-		for (const block of Array.isArray(message?.content)
-			? message.content
-			: []) {
+		for (const block of Array.isArray(message?.content) ? message.content : []) {
 			if (block?.type === "text" && typeof block.text === "string")
 				parts.push(block.text);
 		}
@@ -7463,10 +7496,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const n = Math.min(
-				200,
-				Math.max(1, Number.parseInt(arg1 ?? "", 10) || 40),
-			);
+			const n = Math.min(200, Math.max(1, Number.parseInt(arg1 ?? "", 10) || 40));
 			const tail = readDebugLogTail(n);
 			ctx.ui.notify(
 				tail
@@ -7791,12 +7821,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const snapshot = await refreshUsage(
-				ctx,
-				provider,
-				arg1 === "refresh",
-				true,
-			);
+			const snapshot = await refreshUsage(ctx, provider, arg1 === "refresh", true);
 			const warning = usageErrors.get(provider);
 			if (!snapshot) {
 				ctx.ui.notify(
@@ -7865,9 +7890,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const resolvedTarget = parsed.modelId
 				? `${parsed.provider}/${parsed.modelId}`
 				: parsed.provider;
-			const candidates = resolveTargets(ctx, resolvedTarget, ctx.model, true).filter(
-				(model: any) => providerHasUsableAuth(ctx, model.provider),
-			);
+			const candidates = resolveTargets(
+				ctx,
+				resolvedTarget,
+				ctx.model,
+				true,
+			).filter((model: any) => providerHasUsableAuth(ctx, model.provider));
 			if (candidates.length === 0) {
 				const hasAuth = providerHasUsableAuth(ctx, parsed.provider);
 				ctx.ui.notify(
@@ -7889,7 +7917,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				ctx.model,
 				candidates,
 				`manual /multi-account switch ${target}`,
-				{ armContinuation: false },
+				{ armContinuation: false, announceSwitch: false },
 			);
 			currentPromptSwitch = undefined;
 			if (switched) {
@@ -7977,7 +8005,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				ctx.model,
 				candidates,
 				"manual /multi-account best",
-				{ armContinuation: false },
+				{ armContinuation: false, announceSwitch: false },
 			);
 			currentPromptSwitch = undefined;
 			if (switched) {
@@ -7990,8 +8018,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						`pi-multi-account: no account confirmed availability — ${ctx.model?.provider} has no quota endpoint to check, so this is an unverified guess. Everything measurable is spent.`,
 						"warning",
 					);
-			}
-			else
+			} else
 				ctx.ui.notify(
 					"pi-multi-account: could not switch to the best available account",
 					"warning",
@@ -8113,13 +8140,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				// provider was "cooling" and the round-robin collapsed onto whatever was left. Pass
 				// 0 so we only record lastLeftProvider (anti-ping-pong) and keep every account
 				// selectable, so repeated /multi-account next truly cycles through them all.
-				await switchToFallback(
-					ctx,
-					ctx.model,
-					"manual /multi-account next",
-					0,
-					{ manual: true },
-				);
+				await switchToFallback(ctx, ctx.model, "manual /multi-account next", 0, {
+					manual: true,
+				});
 				currentPromptSwitch = undefined;
 				announceManualChoice(ctx);
 			}
@@ -8152,28 +8175,27 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 		refreshDiscovery(false, ctx);
 		if (command === "status") {
-			// Refresh every rotation member before composing the table, but honour the normal per-account
-			// TTL (Codex: five minutes by default; Anthropic: at least ten minutes to avoid throttling).
-			// `showUsage` only controls background polling, so an explicit status command can still refresh.
-			await refreshRotationUsage(ctx, false, true);
+			// Status is an interactive inspection path: render the best cached snapshot immediately
+			// instead of making the UI wait for the slowest provider. Refresh stale accounts in the
+			// background so the footer and the next status invocation receive the newer values.
+			// `/multi-account limits refresh` remains the explicit wait-for-fresh-data path.
+			runBackground("status usage refresh", ctx, () =>
+				refreshRotationUsage(ctx, false, true),
+			);
 		}
-		const current = ctx.model
-			? `${ctx.model.provider}/${ctx.model.id}`
-			: "none";
+		const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 		// What the rotation looks like to anything that does NOT load this extension: a memory
 		// extension consolidating its notes, an external CLI, any `pi -p --no-extensions` child.
-		// Such a child reads settings.json for the active account, and if that slot is one it
-		// cannot authenticate to it does not fail — it quietly runs on Pi's first available
-		// provider instead, which is a different account and usually a different vendor.
+		// A child launched without an explicit model uses the startup default in settings.json;
+		// report when that default cannot authenticate rather than pretending it tracks the live
+		// rotation account.
 		const childView = slotsAsAChildSeesThem(rotation, readAuthFile());
 		const childUnusable = childView.filter((verdict) => !verdict.usable);
 		const childRouteWarning = defaultRouteWarning(
 			readHostDefaultModel()?.provider,
 			(slotId) => slotsAsAChildSeesThem([slotId], readAuthFile())[0],
 		);
-		const currentUsage = ctx.model
-			? cachedUsage(ctx.model.provider)
-			: undefined;
+		const currentUsage = ctx.model ? cachedUsage(ctx.model.provider) : undefined;
 		const cooldowns = [...exhaustedUntilByProvider.entries()]
 			.filter(([p, until]) => until > Date.now() && !isInvalidated(p))
 			.map(([p, until]) => `${p}: ${formatUntil(until)}`);
@@ -8202,13 +8224,22 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				`${paint("muted", name.padEnd(6))} ${value}`;
 			const providerName = (provider: string) => {
 				switch (usageFamily(provider)) {
-					case "codex": return "Codex";
-					case "anthropic": return "Claude";
-					case "kimi-coding": return "Kimi";
-					case "cursor": return "Cursor";
-					case "ollama": return "Ollama";
-					case "qwen": return "Qwen";
-					default: return provider.replace(/-account-\d+$/, "");
+					case "codex":
+						return "Codex";
+					case "anthropic":
+						return "Claude";
+					case "kimi-coding":
+						return "Kimi";
+					case "antigravity":
+						return "Antigravity";
+					case "cursor":
+						return "Cursor";
+					case "ollama":
+						return "Ollama";
+					case "qwen":
+						return "Qwen";
+					default:
+						return provider.replace(/-account-\d+$/, "");
 				}
 			};
 			const titleCase = (value: string | undefined) =>
@@ -8239,14 +8270,20 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						`${windowLabel(window, display.family, position)} 剩余 ${remainingPercent(window)}% · ${formatResetDuration(window.resetAt)} 后重置`,
 					);
 				}
+				if (
+					display.family === "codex" &&
+					display.rateLimitResetCredits !== undefined
+				)
+					parts.push(`可用重置次数 ${display.rateLimitResetCredits}`);
 				if (!display.primary && !display.secondary && display.plan)
 					parts.push(display.plan);
 				return parts.join("  │  ") || "暂无额度数据";
 			};
 			const recovery = nextRecoveryStatus(ctx);
-			const recoveryText = recovery === "all rotation accounts available now"
-				? "全部账号当前可用"
-				: recovery;
+			const recoveryText =
+				recovery === "all rotation accounts available now"
+					? "全部账号当前可用"
+					: recovery;
 			const unmanaged = unmanagedRotationMembers();
 			const unconfigured = unconfiguredRotationMembers(ctx);
 			const quotaLines = rotation.map((provider) => {
@@ -8256,37 +8293,81 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					? usageColor(displayUsageSnapshot(snapshot))
 					: "muted";
 				return `  ${paint(color, "●")} ${
-					isCurrent ? paint("accent", bold(accountText(provider))) : bold(accountText(provider))
+					isCurrent
+						? paint("accent", bold(accountText(provider)))
+						: bold(accountText(provider))
 				}${isCurrent ? paint("muted", "  当前") : ""}\n    ${paint(color, limitsText(snapshot))}`;
 			});
 			const statusLines = [
 				paint("accent", bold(`pi-multi-account v${VERSION}`)) +
-					paint(config.enabled ? "success" : "error", config.enabled ? "  ● 已启用" : "  ● 已停用") +
+					paint(
+						config.enabled ? "success" : "error",
+						config.enabled ? "  ● 已启用" : "  ● 已停用",
+					) +
 					paint("muted", `  自动发现 ${config.autoDiscover ? "ON" : "OFF"}`),
-				field("账号", paint("accent", bold(ctx.model ? accountText(ctx.model.provider) : "无"))),
+				field(
+					"账号",
+					paint("accent", bold(ctx.model ? accountText(ctx.model.provider) : "无")),
+				),
 				field("模型", ctx.model ? ctx.model.id : "无"),
-				field("轮换", rotation.length ? rotation.map(accountText).join(paint("muted", "  →  ")) : "无账号，请先登录"),
+				field(
+					"轮换",
+					rotation.length
+						? rotation.map(accountText).join(paint("muted", "  →  "))
+						: "无账号，请先登录",
+				),
 				paint("muted", "全部额度"),
 				...(quotaLines.length ? quotaLines : [paint("muted", "  暂无账号")]),
 				field("恢复", paint("success", recoveryText)),
 			];
 			const compactCooldowns = [...exhaustedUntilByProvider.entries()]
-				.filter(([provider, until]) => until > Date.now() && !isInvalidated(provider))
-				.map(([provider, until]) => `${accountText(provider)} (${formatUntil(until)})`);
+				.filter(
+					([provider, until]) => until > Date.now() && !isInvalidated(provider),
+				)
+				.map(
+					([provider, until]) => `${accountText(provider)} (${formatUntil(until)})`,
+				);
 			if (compactCooldowns.length)
-				statusLines.push(field("冷却", paint("warning", compactCooldowns.join(", "))));
+				statusLines.push(
+					field("冷却", paint("warning", compactCooldowns.join(", "))),
+				);
 			if (invalids.length)
-				statusLines.push(field("重登", paint("error", [...invalidatedByProvider.keys()].map(accountText).join(", "))));
+				statusLines.push(
+					field(
+						"重登",
+						paint(
+							"error",
+							[...invalidatedByProvider.keys()].map(accountText).join(", "),
+						),
+					),
+				);
 			if (unconfigured.length)
-				statusLines.push(field("模型", paint("warning", `未配置：${unconfigured.map(accountText).join(", ")}`)));
+				statusLines.push(
+					field(
+						"模型",
+						paint("warning", `未配置：${unconfigured.map(accountText).join(", ")}`),
+					),
+				);
 			if (duplicateSlots.length)
-				statusLines.push(field("重复", paint("warning", `${duplicateSlots.length} 个，请运行 status full 查看`)));
+				statusLines.push(
+					field(
+						"重复",
+						paint("warning", `${duplicateSlots.length} 个，请运行 status full 查看`),
+					),
+				);
 			if (unmanaged.length)
-				statusLines.push(field("额度", paint("warning", `无法追踪：${unmanaged.map(accountText).join(", ")}`)));
+				statusLines.push(
+					field(
+						"额度",
+						paint("muted", `无法追踪：${unmanaged.map(accountText).join(", ")}`),
+					),
+				);
 			if (hasPendingResume())
 				statusLines.push(field("续跑", paint("warning", "等待自动恢复")));
 			if (queuedUserInputs.length)
-				statusLines.push(field("队列", paint("warning", `${queuedUserInputs.length} 条消息`)));
+				statusLines.push(
+					field("队列", paint("warning", `${queuedUserInputs.length} 条消息`)),
+				);
 			const usableChildren = childView.length - childUnusable.length;
 			statusLines.push(
 				field(
@@ -8298,9 +8379,16 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				),
 			);
 			if (childRouteWarning)
-				statusLines.push(paint("warning", "  ⚠ 当前轮换账号无法供无扩展子进程使用；status full 可查看原因"));
+				statusLines.push(
+					paint(
+						"warning",
+						"  ⚠ 已保存的启动默认账号无法供无扩展子进程使用；status full 可查看原因",
+					),
+				);
 			if (lastContractVerdicts.some((verdict) => !verdict.ok))
-				statusLines.push(paint("warning", "  ⚠ Pi 配置文件检查异常；请运行 status full"));
+				statusLines.push(
+					paint("warning", "  ⚠ Pi 配置文件检查异常；请运行 status full"),
+				);
 			statusLines.push(
 				field("操作", paint("accent", "best  ·  next  ·  limits")),
 				paint("muted", "完整诊断  /status full"),
@@ -8584,7 +8672,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (!decision.trim && contextGuardElided.size === 0) return undefined;
 
 		const plan = planElision(messages as GuardMessage[], contextGuardElided, {
-			targetTokens: decision.trim ? decision.targetTokens : Number.POSITIVE_INFINITY,
+			targetTokens: decision.trim
+				? decision.targetTokens
+				: Number.POSITIVE_INFINITY,
 			keepVerbatimTokens: settings.keepVerbatimTokens,
 			minElideTokens: settings.minElideTokens,
 		});
@@ -8649,7 +8739,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (contextGuardTrimmedLastRequest) return undefined;
 		if (!usage || contextGuardLastRaw <= 0) return undefined;
 		const reported =
-			Number(usage.input ?? 0) + Number(usage.cacheRead ?? 0) + Number(usage.cacheWrite ?? 0);
+			Number(usage.input ?? 0) +
+			Number(usage.cacheRead ?? 0) +
+			Number(usage.cacheWrite ?? 0);
 		if (!(reported > 0)) return undefined;
 		contextGuardTracker(ctx).observe(contextGuardLastRaw, reported);
 		return undefined;
@@ -8665,8 +8757,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	// continuation would strand the work the failover logic just rescued).
 	safeOn("agent_settled", (_event: any, ctx: any) => {
 		if (!contextGuardActive()) return undefined;
-		if (!contextGuardWantsCompaction || contextGuardCompactionInFlight) return undefined;
-		if (Date.now() - contextGuardLastCompactionAt < CONTEXT_GUARD_COMPACTION_COOLDOWN_MS)
+		if (!contextGuardWantsCompaction || contextGuardCompactionInFlight)
+			return undefined;
+		if (
+			Date.now() - contextGuardLastCompactionAt <
+			CONTEXT_GUARD_COMPACTION_COOLDOWN_MS
+		)
 			return undefined;
 		if (!ctx?.isIdle?.()) return undefined;
 		if (ctx?.hasPendingMessages?.()) return undefined;
@@ -8734,7 +8830,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	// assistant message in the corpus even ends in a question mark). So instead of guessing from
 	// the outside, the follow-up says plainly that finishing is an allowed answer: a genuinely
 	// complete task is reported in one line rather than padded with invented work.
-	const CONTINUE_AFTER_COMPACTION_TYPE = "multi-account:continue-after-compaction";
+	const CONTINUE_AFTER_COMPACTION_TYPE =
+		"multi-account:continue-after-compaction";
 	const CONTINUE_AFTER_COMPACTION_PROMPT = [
 		"The conversation history above was just compacted automatically: it is now a summary plus",
 		"the most recent messages. Nothing was cancelled and nothing was asked of you — carry on with",
@@ -8750,7 +8847,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (!config.enabled || !config.continueAfterCompaction) return undefined;
 		// Only automatic compactions. A manual /compact (or the context guard's own request at a
 		// settled boundary) is a deliberate pause, not an interruption to paper over.
-		if (event?.reason !== "threshold" && event?.reason !== "overflow") return undefined;
+		if (event?.reason !== "threshold" && event?.reason !== "overflow")
+			return undefined;
 		// Pi is already retrying this turn by itself; a second queued message would double up.
 		if (event?.willRetry) return undefined;
 		// The run loop must still be live: that is what makes `hasQueuedMessages()` be consulted
@@ -8852,7 +8950,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	/** The credential to send upstream, refreshed first when the stored one has expired. */
-	async function credentialForProxy(slotId: string): Promise<AuthEntry | undefined> {
+	async function credentialForProxy(
+		slotId: string,
+	): Promise<AuthEntry | undefined> {
 		let entry = readAuthFile()[slotId];
 		if (!entry) return undefined;
 		if (entry.type !== "oauth" || typeof entry.access !== "string") return entry;
@@ -8889,7 +8989,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (typeof req.headers?.upgrade === "string") {
 			logEvent("slot_proxy_upgrade_refused", { upgrade: req.headers.upgrade });
 			res.writeHead(501, { "content-type": "application/json" });
-			res.end(JSON.stringify({ error: { message: "this route serves HTTP only" } }));
+			res.end(
+				JSON.stringify({ error: { message: "this route serves HTTP only" } }),
+			);
 			return;
 		}
 		const verdict = admitRequest({
@@ -8898,7 +9000,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			routes: slotProxyRoutes,
 		});
 		if (!verdict.ok) {
-			logEvent("slot_proxy_refused", { status: verdict.status, reason: verdict.message });
+			logEvent("slot_proxy_refused", {
+				status: verdict.status,
+				reason: verdict.message,
+			});
 			res.writeHead(verdict.status, { "content-type": "application/json" });
 			res.end(JSON.stringify({ error: { message: verdict.message } }));
 			return;
@@ -8921,15 +9026,22 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 
 		let body: Buffer | undefined =
-			req.method === "GET" || req.method === "HEAD" ? undefined : await readRequestBody(req);
-		if (body && verdict.route.family === "anthropic" && credential?.type === "oauth") {
+			req.method === "GET" || req.method === "HEAD"
+				? undefined
+				: await readRequestBody(req);
+		if (
+			body &&
+			verdict.route.family === "anthropic" &&
+			credential?.type === "oauth"
+		) {
 			// The same shaping the in-process path applies: without it Anthropic rejects a
 			// subscription token outright. Done here because the child cannot do it — it has no
 			// idea it is talking to a proxy.
 			try {
 				const parsed = JSON.parse(body.toString("utf8"));
 				const reshaped = shapeAnthropicOAuthPayload(parsed);
-				if (reshaped && reshaped !== parsed) body = Buffer.from(JSON.stringify(reshaped));
+				if (reshaped && reshaped !== parsed)
+					body = Buffer.from(JSON.stringify(reshaped));
 			} catch {
 				// Not JSON, or not a messages payload — forward exactly as received.
 			}
@@ -8965,10 +9077,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			});
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
-			logEvent("slot_proxy_upstream_failed", { slot: verdict.route.slotId, reason });
+			logEvent("slot_proxy_upstream_failed", {
+				slot: verdict.route.slotId,
+				reason,
+			});
 			if (!res.headersSent) {
 				res.writeHead(502, { "content-type": "application/json" });
-				res.end(JSON.stringify({ error: { message: `upstream request failed: ${reason}` } }));
+				res.end(
+					JSON.stringify({
+						error: { message: `upstream request failed: ${reason}` },
+					}),
+				);
 			} else {
 				res.end();
 			}
@@ -9005,7 +9124,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// A dead listener must never take Pi down with it — the same rule the Cursor bridge
 			// learned the hard way.
 			server.on("error", (error: NodeJS.ErrnoException) => {
-				if (error.code === "EADDRINUSE" && server.listening === false && !slotProxyPort) {
+				if (
+					error.code === "EADDRINUSE" &&
+					server.listening === false &&
+					!slotProxyPort
+				) {
 					// Another Pi process already holds the preferred port. Take any free one and
 					// republish; both processes hold the same credentials, so either serves.
 					server.listen(0, "127.0.0.1");
@@ -9016,7 +9139,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			});
 			server.listen(SLOT_PROXY_PORT, "127.0.0.1", () => {
 				const address = server.address();
-				slotProxyPort = typeof address === "object" && address ? address.port : undefined;
+				slotProxyPort =
+					typeof address === "object" && address ? address.port : undefined;
 				slotProxyServer = server;
 				server.unref(); // never hold Pi open on our account
 				logEvent("slot_proxy_listening", { port: slotProxyPort });
@@ -9072,9 +9196,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				const cached = codexModelCatalogByProvider.get(id)?.models as
 					| Array<Record<string, unknown>>
 					| undefined;
-				const models = (cached?.length ? cached : DEFAULT_CODEX_MODELS.map(codexModelDef)) as Array<
-					Record<string, unknown>
-				>;
+				const models = (
+					cached?.length ? cached : DEFAULT_CODEX_MODELS.map(codexModelDef)
+				) as Array<Record<string, unknown>>;
 				// Published as Codex's own API on purpose: Pi then shapes the body the way that
 				// backend requires (`store: false`, the instructions field, its own headers), which
 				// a generic `openai-responses` slot would not. The cost is that Pi insists on
@@ -9092,6 +9216,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	function preflightHostCapabilities(ctx: any) {
+		// SAFETY: ExtensionAPI is an object at runtime; this lookup only feature-detects optional
+		// host methods and never invokes or otherwise trusts the asserted property value.
 		const has = (name: string) =>
 			typeof (pi as unknown as Record<string, unknown>)[name] === "function";
 		const caps = {
@@ -9184,12 +9310,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			`pi-multi-account v${VERSION} loaded (${config.enabled ? "enabled" : "disabled"}). ${rotation.length} account(s) in rotation. Config: ${CONFIG_PATH}`,
 			"info",
 		);
-		if (duplicateSlots.length > 0) {
-			ctx.ui.notify(
-				`pi-multi-account: duplicate account slot(s) skipped: ${duplicateSlots.map(({ duplicate, primary }) => `${duplicate} duplicates ${primary}`).join(", ")}. Log the duplicate slot into a different account.`,
-				"warning",
-			);
-		}
 		// Refresh every account BEFORE deciding the selected model is unavailable. Otherwise a
 		// plan upgrade can revive the current account milliseconds after startup preflight has
 		// already switched away from it using the old plan's stale 100% snapshot.
@@ -9252,15 +9372,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// Only intercept when we are genuinely holding a cancellation message;
 		// otherwise leave the host alone (and its queue alone).
 		if (queuedUserInputs.length > 0) {
-			return { cancel: true, reason: "compaction cancelled: failover queue must flush" };
+			return {
+				cancel: true,
+				reason: "compaction cancelled: failover queue must flush",
+			};
 		}
 		// runHealthyCompaction returns undefined only when routing is off or the current
 		// account is healthy. If the current account is still spent, do not let Pi default
 		// compact on it — that is the hang.
-		if (
-			config.routeCompactionToHealthyAccount &&
-			!isCurrentModelReady(ctx)
-		) {
+		if (config.routeCompactionToHealthyAccount && !isCurrentModelReady(ctx)) {
 			return {
 				cancel: true,
 				reason: "active account unavailable for compaction",
@@ -9306,11 +9426,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	});
 
 	safeOn("input", async (event, ctx) => {
-		if (
-			!config.enabled ||
-			(event as any).source === "extension" ||
-			!ctx.isIdle()
-		)
+		if (!config.enabled || (event as any).source === "extension" || !ctx.isIdle())
 			return { action: "continue" as const };
 		const text =
 			typeof (event as any).text === "string" ? (event as any).text : "";
@@ -9326,9 +9442,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		retireSpentManualPin();
 		retireSpentFailoverPin();
 
-		if (
-			await ensureReadyModel(ctx, "preflight: selected account unavailable")
-		) {
+		if (await ensureReadyModel(ctx, "preflight: selected account unavailable")) {
 			return { action: "continue" as const };
 		}
 
@@ -9414,13 +9528,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		handledAssistantErrors.clear();
 		captureDesiredThinking(ctx); // remember the level BEFORE any failover can clamp it
 		refreshDiscovery(false, ctx); // also refresh Pi's in-memory AuthStorage
-		if (pendingSettingsCheck) {
-			// A switch happened; Pi should have rewritten settings.json to name it. If it did not,
-			// every extension-free child spawned from here on runs on the wrong account, and this
-			// is the last place that is still explainable.
-			pendingSettingsCheck = false;
-			checkPiContract(ctx, "after_model_switch", true);
-		}
 		if (!usageStatusTimer) startUsageStatusTimer(ctx);
 		updateUsageStatus(ctx);
 	});
@@ -9428,9 +9535,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	safeOn("model_select", (event, ctx) => {
 		const model = (event as any).model;
 		if (!model?.provider || !model?.id) return;
-		// A user-driven switch goes through Pi's own path, which is the same path that is supposed
-		// to rewrite settings.json — so it deserves the same verification as one of ours.
-		pendingSettingsCheck = true;
 		updateUsageStatus(ctx, model.provider);
 		runBackground("model_select usage refresh", ctx, () =>
 			refreshUsage(ctx, model.provider),
@@ -9479,10 +9583,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			if (cooldownMs !== undefined) {
 				responseCooldownHints.set(
 					ctx.model.provider,
-					Math.max(
-						responseCooldownHints.get(ctx.model.provider) ?? 0,
-						cooldownMs,
-					),
+					Math.max(responseCooldownHints.get(ctx.model.provider) ?? 0, cooldownMs),
 				);
 			}
 		}
@@ -9561,11 +9662,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// error while live accounts sat unused. Transient blips and model-specific errors keep
 			// the light touch, because those genuinely are momentary or model-scoped.
 			const accountLevel = isLimitError(errorText) || isAuthError(errorText);
-			if (
-				accountLevel ||
-				isModelError(errorText) ||
-				isTransientError(errorText)
-			) {
+			if (accountLevel || isModelError(errorText) || isTransientError(errorText)) {
 				await switchToFallback(
 					ctx,
 					failedModel,
@@ -9625,7 +9722,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				const sharedClientHint =
 					classifyProvider(provider, config.qwenProvider) === "anthropic" &&
 					/invalid_grant|revoked/i.test(reason)
-						? ' Its refresh token was revoked server-side. Claude Pro/Max logins from every CLI share one client id and Anthropic keeps a single live refresh token per account, so signing this same account into another tool (Claude Code, another machine, or a second slot here) revokes this one. Use a different Claude account per slot, and keep the account another tool is signed into out of this rotation.'
+						? " Its refresh token was revoked server-side. Claude Pro/Max logins from every CLI share one client id and Anthropic keeps a single live refresh token per account, so signing this same account into another tool (Claude Code, another machine, or a second slot here) revokes this one. Use a different Claude account per slot, and keep the account another tool is signed into out of this rotation."
 						: "";
 				ctx.ui.notify(
 					`Provider failover: ${provider} authorization is invalid. Run /login, choose "Use a subscription", then select ${provider}.${sharedClientHint}`,
@@ -9689,8 +9786,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (watchdogAborting) {
 			watchdogAborting = false;
 			endResumeWatch();
-			const failed =
-				ctx.model?.provider && ctx.model?.id ? ctx.model : undefined;
+			const failed = ctx.model?.provider && ctx.model?.id ? ctx.model : undefined;
 			currentPromptSwitch = undefined;
 			continuationDispatchedForAgentTurn = false;
 			if (failed && config.enabled && config.autoContinue) {

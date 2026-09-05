@@ -72,17 +72,10 @@ export const PI_ASSUMPTIONS: readonly PiAssumption[] = Object.freeze([
   }),
   Object.freeze({
     id: "settings-default-model-key",
-    fact: "settings.json carries `defaultProvider` and `defaultModel`.",
+    fact: "settings.json may carry the optional startup defaults `defaultProvider` and `defaultModel`.",
     kind: "documented" as const,
     surface: "docs/settings.md",
-    breaks: "Nothing directly; it is the key the next row writes to.",
-  }),
-  Object.freeze({
-    id: "settings-default-model-autowritten",
-    fact: "Pi itself writes defaultProvider/defaultModel on every model switch, so they always name the ACTIVE rotation slot.",
-    kind: "observed" as const,
-    surface: "dist/core/agent-session.js — setDefaultModelAndProvider, called from the host's own setModel path. Documentation describes the keys but never promises they are maintained.",
-    breaks: "Any extension-free child picking up the active model: it would run on a stale slot, or fall through to Pi's own first-available provider.",
+    breaks: "Status can no longer explain which model an extension-free child starts on when no model is specified.",
   }),
   Object.freeze({
     id: "child-reads-published-files-only",
@@ -188,10 +181,11 @@ export function checkModelsShape(raw: unknown): ShapeVerdict {
 }
 
 /**
- * `settings.json`: we depend on two keys, and on Pi keeping them current.
+ * `settings.json`: the startup defaults are optional, but their types are documented when present.
  *
- * Their absence is the observable symptom of the `settings-default-model-autowritten` assumption
- * failing — which is the one assumption in the ledger that nothing in Pi promises.
+ * They are deliberately not compared with the live model. Pi 0.84 writes them only when the user
+ * explicitly saves a default; an ordinary model switch, including `pi.setModel()`, does not persist
+ * them and should not mutate the user's startup preference.
  */
 export function checkSettingsShape(raw: unknown): ShapeVerdict {
   const problems: string[] = [];
@@ -202,11 +196,6 @@ export function checkSettingsShape(raw: unknown): ShapeVerdict {
   const model = raw.defaultModel;
   if (provider !== undefined && typeof provider !== "string") problems.push("`defaultProvider` is not a string");
   if (model !== undefined && typeof model !== "string") problems.push("`defaultModel` is not a string");
-  if (provider === undefined && model === undefined) {
-    problems.push(
-      "neither `defaultProvider` nor `defaultModel` is recorded — Pi normally writes both on every model switch, so their absence means an extension-free child has no way to learn which account is active",
-    );
-  }
   return { file: "settings.json", ok: problems.length === 0, problems };
 }
 
@@ -227,38 +216,6 @@ export function describeContractDrift(verdicts: readonly ShapeVerdict[]): string
     ...lines,
     "Rotation may behave oddly until this is resolved; run /multi-account status for the current view.",
   ].join("\n");
-}
-
-/**
- * The sharpest form of the settings check: does `settings.json` actually name the model that is
- * running right now?
- *
- * This is where the one unpromised assumption becomes falsifiable. Pi writes
- * `defaultProvider`/`defaultModel` on every model switch, which is the only reason an
- * extension-free child can be pointed at the account the rotation chose. If the file ever stops
- * tracking the live model, nothing fails here — the failure happens later, inside a child that
- * quietly runs on a different vendor's account. So the disagreement has to be caught at the point
- * where it is still explainable.
- *
- * Only meaningful once a switch has happened in this session: before that, the file legitimately
- * holds the previous session's choice.
- */
-export function checkSettingsTracksActive(
-  raw: unknown,
-  active: { provider: string; id: string },
-): ShapeVerdict {
-  const base = checkSettingsShape(raw);
-  if (!base.ok) return base;
-  const settings = raw as Record<string, unknown>;
-  const problems: string[] = [];
-  const recorded = `${settings.defaultProvider ?? "(unset)"}/${settings.defaultModel ?? "(unset)"}`;
-  const live = `${active.provider}/${active.id}`;
-  if (recorded !== live) {
-    problems.push(
-      `records ${recorded} while the session is running ${live}; Pi normally rewrites both keys on every model switch, and any extension-free child reads them — so a child spawned now would run on ${recorded}, not on the account the rotation selected`,
-    );
-  }
-  return { file: "settings.json", ok: problems.length === 0, problems };
 }
 
 /** The assumptions to re-check after a Pi upgrade — the ones nobody promised. */

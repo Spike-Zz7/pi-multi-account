@@ -19,7 +19,6 @@ import {
   checkAuthShape,
   checkModelsShape,
   checkSettingsShape,
-  checkSettingsTracksActive,
   describeContractDrift,
   observedAssumptions,
 } from "../pi-contract.ts";
@@ -48,12 +47,12 @@ test("every assumption says whether Pi promised it, where, and what breaks", () 
   assert.equal(new Set(ids).size, ids.length, "ids must be unique");
 });
 
-test("the two assumptions nobody promised are marked as such", () => {
+test("assumptions nobody promised are marked as such", () => {
   const observed = observedAssumptions().map((a) => a.id);
-  // These are the re-check list after every Pi upgrade. Losing the mark on either one is how a
-  // guess quietly becomes treated as a contract.
-  assert.ok(observed.includes("settings-default-model-autowritten"));
+  // These are the re-check list after every Pi upgrade. Losing the mark is how a guess quietly
+  // becomes treated as a contract.
   assert.ok(observed.includes("oauth-needs-provider-declared-flow"));
+  assert.equal(observed.includes("settings-default-model-autowritten"), false);
   assert.ok(observed.length < PI_ASSUMPTIONS.length, "not everything is a guess");
 });
 
@@ -125,61 +124,16 @@ test("settings.json: both keys present is the healthy case", () => {
   assert.equal(verdict.ok, true);
 });
 
-test("settings.json: both keys missing is the symptom of the unpromised assumption failing", () => {
-  // Pi writes these on every model switch today. If it stops, an extension-free child has no way
-  // to learn which account is active — and it will silently run on something else.
+test("settings.json: startup defaults are optional", () => {
+  // Pi does not write these on an ordinary model switch. Their absence is valid and means model
+  // resolution will use the normal provider fallback rules.
   const verdict = checkSettingsShape({ theme: "dark" });
-  assert.equal(verdict.ok, false);
-  assert.match(verdict.problems[0], /every model switch/);
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.problems, []);
 });
 
 test("settings.json: a wrong type is caught even when the key exists", () => {
   assert.equal(checkSettingsShape({ defaultProvider: 42, defaultModel: "m" }).ok, false);
-});
-
-// ---------------------------------------------------------------------------
-// settings.json tracking the LIVE model — the falsifiable form of that assumption
-// ---------------------------------------------------------------------------
-
-const active = { provider: "openai-codex-account-4", id: "gpt-5.6-sol" };
-
-test("settings.json naming the running model is the whole point, and passes", () => {
-  const verdict = checkSettingsTracksActive(
-    { defaultProvider: "openai-codex-account-4", defaultModel: "gpt-5.6-sol" },
-    active,
-  );
-  assert.equal(verdict.ok, true);
-});
-
-test("a stale default is caught, and the message names both models", () => {
-  // This is the exact live failure that started all of this: the rotation was on Codex, the file
-  // said something else, and a bare child ended up on Anthropic and got billed-refused.
-  const verdict = checkSettingsTracksActive(
-    { defaultProvider: "anthropic", defaultModel: "claude-opus-5" },
-    active,
-  );
-  assert.equal(verdict.ok, false);
-  assert.match(verdict.problems[0], /anthropic\/claude-opus-5/);
-  assert.match(verdict.problems[0], /openai-codex-account-4\/gpt-5\.6-sol/);
-  // Without the consequence spelled out this reads as cosmetic drift rather than "your children
-  // are running on the wrong account".
-  assert.match(verdict.problems[0], /child/);
-});
-
-test("the model alone differing is still a mismatch", () => {
-  const verdict = checkSettingsTracksActive(
-    { defaultProvider: "openai-codex-account-4", defaultModel: "gpt-5.6-mini" },
-    active,
-  );
-  assert.equal(verdict.ok, false);
-});
-
-test("a broken settings file reports the shape problem rather than a bogus mismatch", () => {
-  // Reporting "records (unset)/(unset)" for a file that is not even an object would send someone
-  // hunting for a rotation bug instead of a corrupt file.
-  const verdict = checkSettingsTracksActive("nonsense", active);
-  assert.equal(verdict.ok, false);
-  assert.deepEqual(verdict.problems, ["not a JSON object"]);
 });
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	fetchUsageSnapshot,
 	formatUsageCompact,
+	formatUsageStatus,
 	parseAnthropicUsageBody,
 	parseCodexUsageBody,
 	parseCodexUsageHeaders,
@@ -29,6 +30,11 @@ test("parses Codex 5h and weekly usage response", () => {
 				},
 			},
 			credits: { has_credits: false, unlimited: false, balance: "0" },
+			// Shape returned by the live /backend-api/wham/usage endpoint.
+			rate_limit_reset_credits: {
+				available_count: 2,
+				applicable_available_count: 0,
+			},
 		},
 		NOW,
 		"credential",
@@ -37,9 +43,14 @@ test("parses Codex 5h and weekly usage response", () => {
 	assert.equal(snapshot.plan, "plus");
 	assert.equal(snapshot.primary?.usedPercent, 100);
 	assert.equal(snapshot.secondary?.usedPercent, 58);
+	assert.equal(snapshot.rateLimitResetCredits, 2);
 	assert.equal(
 		formatUsageCompact(snapshot, NOW),
 		"Codex A2 | plus | 5h 0% left/1h | 7d 42% left/2d",
+	);
+	assert.equal(
+		formatUsageStatus(snapshot, NOW),
+		"Codex A2 · 5h 0%/1h · 7d 42%/2d · reset 2",
 	);
 });
 
@@ -84,32 +95,49 @@ test("parses case-insensitive Codex response headers", () => {
 			"x-codex-secondary-used-percent": "9",
 			"X-Codex-Secondary-Window-Minutes": "10080",
 			"x-codex-secondary-reset-at": String(NOW / 1000 + 86_400),
+			"x-codex-rate-limit-reset-credits": "1",
 		},
 		NOW,
 	);
 	assert.ok(snapshot);
 	assert.equal(snapshot.primary?.windowSeconds, 18_000);
 	assert.equal(snapshot.secondary?.windowSeconds, 604_800);
-	assert.equal(formatUsageCompact(snapshot, NOW), "Codex A4 | 5h 27% left/30m | 7d 91% left/1d");
+	assert.equal(snapshot.rateLimitResetCredits, 1);
+	assert.equal(
+		formatUsageCompact(snapshot, NOW),
+		"Codex A4 | 5h 27% left/30m | 7d 91% left/1d",
+	);
 });
 
 test("parses Anthropic OAuth usage windows", () => {
 	const snapshot = parseAnthropicUsageBody(
 		"anthropic-account-2",
 		{
-			five_hour: { utilization: 84, resets_at: new Date(NOW + 90 * 60_000).toISOString() },
-			seven_day: { utilization: 12, resets_at: new Date(NOW + 3 * 86_400_000).toISOString() },
+			five_hour: {
+				utilization: 84,
+				resets_at: new Date(NOW + 90 * 60_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 12,
+				resets_at: new Date(NOW + 3 * 86_400_000).toISOString(),
+			},
 		},
 		NOW,
 	);
 	assert.ok(snapshot);
 	assert.equal(snapshot.primary?.usedPercent, 84);
-	assert.equal(formatUsageCompact(snapshot, NOW), "Claude A2 | 5h 16% left/1h30m | 7d 88% left/3d");
+	assert.equal(
+		formatUsageCompact(snapshot, NOW),
+		"Claude A2 | 5h 16% left/1h30m | 7d 88% left/3d",
+	);
 });
 
 test("Codex usage fetch sends the account id and never exposes the token in the snapshot", async () => {
 	let seenHeaders: Headers | undefined;
-	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+	const fetchImpl = (async (
+		_input: string | URL | Request,
+		init?: RequestInit,
+	) => {
 		seenHeaders = new Headers(init?.headers);
 		return new Response(
 			JSON.stringify({
@@ -153,7 +181,11 @@ test("the provider's own allowed/limit_reached verdict is carried, not just the 
 			secondary_window: null,
 		},
 	});
-	assert.equal(free?.serviceable, true, "an account the provider allows must be marked usable");
+	assert.equal(
+		free?.serviceable,
+		true,
+		"an account the provider allows must be marked usable",
+	);
 
 	const spent = parseCodexUsageBody("openai-codex-account-3", {
 		plan_type: "free",
@@ -168,7 +200,11 @@ test("the provider's own allowed/limit_reached verdict is carried, not just the 
 			secondary_window: null,
 		},
 	});
-	assert.equal(spent?.serviceable, false, "and one it refuses must be marked blocked");
+	assert.equal(
+		spent?.serviceable,
+		false,
+		"and one it refuses must be marked blocked",
+	);
 
 	const silent = parseCodexUsageBody("openai-codex", {
 		plan_type: "plus",
@@ -208,9 +244,17 @@ test("the account's identity travels with its usage, and shows in the footer", (
 
 	const footer = formatUsageCompact(snapshot!, Date.now());
 	assert.match(footer, /Codex A2/, "the slot is still named");
-	assert.match(footer, /alice/, `and the real account with it; footer: ${footer}`);
+	assert.match(
+		footer,
+		/alice/,
+		`and the real account with it; footer: ${footer}`,
+	);
 	assert.match(footer, /free/, `along with the plan; footer: ${footer}`);
-	assert.match(footer, /60% left/, `without losing the quota; footer: ${footer}`);
+	assert.match(
+		footer,
+		/60% left/,
+		`without losing the quota; footer: ${footer}`,
+	);
 });
 
 test("a footer for an account with no email is unchanged", () => {
@@ -253,6 +297,66 @@ test("a Kimi Coding slot reports itself instead of throwing", async () => {
 	);
 });
 
+test("an Antigravity slot parses usage windows from loadCodeAssist and fetchAvailableModels", async () => {
+	const mockFetch = async (url: any) => {
+		const sUrl = String(url);
+		if (sUrl.includes("loadCodeAssist")) {
+			return {
+				ok: true,
+				status: 200,
+				json: async () => ({
+					currentTier: { id: "free-tier", name: "Antigravity Free" },
+					cloudaicompanionProject: "proj-123",
+				}),
+			} as any;
+		}
+		if (sUrl.includes("fetchAvailableModels")) {
+			return {
+				ok: true,
+				status: 200,
+				json: async () => ({
+					models: {
+						"gemini-3.8-flash": {
+							quotaInfo: {
+								remainingFraction: 0.8,
+								resetTime: new Date(Date.now() + 3600 * 1000).toISOString(),
+							},
+						},
+						"claude-sonnet-4-6": {
+							quotaInfo: {
+								remainingFraction: 0.95,
+								resetTime: new Date(Date.now() + 7200 * 1000).toISOString(),
+							},
+						},
+					},
+				}),
+			} as any;
+		}
+		return { ok: false, status: 404 } as any;
+	};
+
+	const snapshot = await fetchUsageSnapshot(
+		"antigravity",
+		{
+			type: "oauth",
+			access: "ya29.test-token",
+			email: "user@example.com",
+		},
+		{
+			fetchImpl: mockFetch as any,
+		},
+	);
+
+	assert.equal(snapshot.family, "antigravity");
+	assert.equal(snapshot.plan, "Antigravity Free");
+	assert.equal(snapshot.account, "user@example.com");
+	assert.equal(snapshot.serviceable, true);
+	assert.ok(snapshot.primary);
+	assert.equal(snapshot.primary.usedPercent, 20);
+	assert.ok(snapshot.secondary);
+	assert.equal(snapshot.secondary.usedPercent, 5);
+});
+
 test("a window is labelled by its real length, and the provider's verdict beats the percentage", () => {
 	// Two ways the footer misled at once. A Codex free plan meters a THIRTY-DAY window, and it was
 	// labelled "5h" because that is the slot the field sits in — so a number that resets next month
@@ -279,8 +383,16 @@ test("a window is labelled by its real length, and the provider's verdict beats 
 		now,
 	);
 	const footer = formatUsageCompact(snapshot!, now);
-	assert.doesNotMatch(footer, /5h/, `a 30-day window must not be labelled 5h; footer: ${footer}`);
-	assert.match(footer, /30d/, `it must carry its real length; footer: ${footer}`);
+	assert.doesNotMatch(
+		footer,
+		/5h/,
+		`a 30-day window must not be labelled 5h; footer: ${footer}`,
+	);
+	assert.match(
+		footer,
+		/30d/,
+		`it must carry its real length; footer: ${footer}`,
+	);
 	assert.match(
 		footer,
 		/ok|usable|✓/i,

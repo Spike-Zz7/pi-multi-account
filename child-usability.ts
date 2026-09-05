@@ -3,11 +3,10 @@
  *
  * ## Why this exists
  *
- * Pi writes `defaultProvider`/`defaultModel` into `settings.json` on every model switch
- * (`setDefaultModelAndProvider`, called from the host's own `setModel` path). Those keys
- * therefore always name whichever rotation slot is active. Anything that later spawns a bare
- * `pi -p --no-extensions` child — a memory extension consolidating its notes, an external CLI,
- * a future brokered worker — reads them and tries to run on that slot.
+ * Pi stores optional startup defaults as `defaultProvider`/`defaultModel` in `settings.json`.
+ * They change only when the user explicitly saves a default; ordinary model switches, including
+ * extension-driven rotation, do not rewrite them. A bare `pi -p --no-extensions` child launched
+ * without an explicit model reads those defaults and tries to run on that slot.
  *
  * A child launched that way does not load this extension, so a slot named `openai-codex-account-4`
  * exists for it only if we published it into Pi's own `models.json`. Publishing the *name*,
@@ -150,25 +149,23 @@ export function classifyChildUsability(facts: SlotChildFacts): ChildUsability {
 }
 
 /**
- * The slot a bare child would actually be sent to, given what Pi has recorded as the session
- * default. Returns `undefined` when the default is fine.
+ * The slot a bare child would actually be sent to, given Pi's saved startup default. Returns
+ * `undefined` when the default is fine.
  *
- * This is the check that turns a silent, far-away failure into something sayable here: when the
- * active rotation slot is not child-usable, every child spawned without an explicit `--model`
- * falls through Pi's own "first available provider" list instead — which is a different account,
- * often a different vendor, and never the one the rotation chose.
+ * This turns a silent, far-away failure into something sayable here: when the saved default is
+ * not child-usable, a child spawned without an explicit `--model` may fall through to Pi's own
+ * first available provider instead.
  */
 export function defaultRouteWarning(
-  activeSlotId: string | undefined,
+  defaultSlotId: string | undefined,
   classify: (slotId: string) => ChildUsability | undefined,
 ): string | undefined {
-  if (!activeSlotId) return undefined;
-  const verdict = classify(activeSlotId);
+  if (!defaultSlotId) return undefined;
+  const verdict = classify(defaultSlotId);
   if (!verdict || verdict.usable) return undefined;
   return (
-    `Pi records ${activeSlotId} as the session default, but an extension-free child cannot use it: ` +
-    `${verdict.reason} Such a child falls back to Pi's own first-available provider instead of the ` +
-    `account rotation selected. ${verdict.remedy}`
+    `Pi records ${defaultSlotId} as the startup default, but an extension-free child cannot use it: ` +
+    `${verdict.reason} Such a child may fall back to Pi's own first-available provider. ${verdict.remedy}`
   );
 }
 

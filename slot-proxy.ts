@@ -1,16 +1,15 @@
 /**
- * A parent-owned loopback route that lets a child run on the account the rotation chose.
+ * A parent-owned loopback route that lets an extension-free child use a rotation slot.
  *
  * ## The problem this exists for
  *
- * Pi keeps `settings.json` pointed at the active model, so anything spawned without this
- * extension loaded — a memory extension consolidating its notes, an external CLI, a bare
- * `pi -p --no-extensions` call — reads those two keys and tries to run on the active rotation
- * slot. Publishing that slot's *name* into `models.json` is not enough: measured 2026-08-24, a
- * published slot carrying an OAuth credential fails with `No API key found`, because Pi honours
- * an OAuth credential only for a provider definition that declares the flow, and a `models.json`
- * entry declares none. The child then falls through to Pi's own first-available provider — a
- * different account, usually a different vendor, silently.
+ * Anything spawned without this extension loaded — a memory extension consolidating its notes,
+ * an external CLI, or a bare `pi -p --no-extensions` call — can be pointed at a published slot
+ * explicitly (or through Pi's saved startup default). Publishing that slot's *name* into
+ * `models.json` is not enough: measured 2026-08-24, a published slot carrying an OAuth credential
+ * fails with `No API key found`, because Pi honours an OAuth credential only for a provider
+ * definition that declares the flow, and a `models.json` entry declares none. The child may then
+ * fall through to Pi's own first-available provider — a different account or vendor, silently.
  *
  * The Cursor slots already solve this, and the shape is the answer for every OAuth family:
  * publish the slot against a route the parent serves on `127.0.0.1`, with a deliberately

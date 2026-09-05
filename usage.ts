@@ -1,4 +1,11 @@
-export type UsageFamily = "codex" | "anthropic" | "ollama" | "cursor" | "qwen" | "kimi-coding";
+export type UsageFamily =
+	| "codex"
+	| "anthropic"
+	| "ollama"
+	| "cursor"
+	| "qwen"
+	| "kimi-coding"
+	| "antigravity";
 
 export type UsageWindow = {
 	usedPercent: number;
@@ -36,6 +43,8 @@ export type UsageSnapshot = {
 		unlimited?: boolean;
 		balance?: string;
 	};
+	/** Number of provider-granted manual rate-limit resets still available. */
+	rateLimitResetCredits?: number;
 };
 
 export type UsageCredential = {
@@ -44,6 +53,8 @@ export type UsageCredential = {
 	accountId?: string;
 	key?: string;
 	expires?: number;
+	email?: string;
+	projectId?: string;
 };
 
 export class UsageFetchError extends Error {
@@ -56,8 +67,10 @@ export class UsageFetchError extends Error {
 	}
 }
 
-function record(value: unknown): Record<string, any> {
-	return value && typeof value === "object" ? (value as Record<string, any>) : {};
+function record(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object"
+		? (value as Record<string, unknown>)
+		: {};
 }
 
 function finiteNumber(value: unknown): number | undefined {
@@ -71,7 +84,11 @@ function percent(value: unknown): number | undefined {
 }
 
 function epochMs(value: unknown): number | undefined {
-	if (typeof value === "string" && value.trim() && !Number.isFinite(Number(value))) {
+	if (
+		typeof value === "string" &&
+		value.trim() &&
+		!Number.isFinite(Number(value))
+	) {
 		const parsed = Date.parse(value);
 		return Number.isFinite(parsed) ? parsed : undefined;
 	}
@@ -80,12 +97,16 @@ function epochMs(value: unknown): number | undefined {
 	return number < 10_000_000_000 ? number * 1000 : number;
 }
 
-function usageWindow(value: unknown, fallbackWindowSeconds?: number): UsageWindow | undefined {
+function usageWindow(
+	value: unknown,
+	fallbackWindowSeconds?: number,
+): UsageWindow | undefined {
 	const source = record(value);
 	const usedPercent = percent(source.used_percent ?? source.utilization);
 	const resetAt = epochMs(source.reset_at ?? source.resets_at);
 	if (usedPercent === undefined || resetAt === undefined) return undefined;
-	const windowSeconds = finiteNumber(source.limit_window_seconds) ?? fallbackWindowSeconds;
+	const windowSeconds =
+		finiteNumber(source.limit_window_seconds) ?? fallbackWindowSeconds;
 	return {
 		usedPercent,
 		resetAt,
@@ -94,12 +115,27 @@ function usageWindow(value: unknown, fallbackWindowSeconds?: number): UsageWindo
 }
 
 export function usageFamily(provider: string): UsageFamily | undefined {
-	if (provider === "openai-codex" || /^openai-codex-account-\d+$/.test(provider)) return "codex";
-	if (provider === "anthropic" || /^anthropic-account-\d+$/.test(provider)) return "anthropic";
-	if (provider === "ollama" || /^ollama-account-\d+$/.test(provider)) return "ollama";
-	if (provider === "cursor" || /^cursor-account-\d+$/.test(provider)) return "cursor";
-	if (provider === "alibaba" || /^alibaba-account-\d+$/.test(provider) || /^qwen/i.test(provider)) return "qwen";
-	if (provider === "kimi-coding" || /^kimi-coding-account-\d+$/.test(provider)) return "kimi-coding";
+	if (
+		provider === "openai-codex" ||
+		/^openai-codex-account-\d+$/.test(provider)
+	)
+		return "codex";
+	if (provider === "anthropic" || /^anthropic-account-\d+$/.test(provider))
+		return "anthropic";
+	if (provider === "ollama" || /^ollama-account-\d+$/.test(provider))
+		return "ollama";
+	if (provider === "cursor" || /^cursor-account-\d+$/.test(provider))
+		return "cursor";
+	if (
+		provider === "alibaba" ||
+		/^alibaba-account-\d+$/.test(provider) ||
+		/^qwen/i.test(provider)
+	)
+		return "qwen";
+	if (provider === "kimi-coding" || /^kimi-coding-account-\d+$/.test(provider))
+		return "kimi-coding";
+	if (provider === "antigravity" || /^antigravity-account-\d+$/.test(provider))
+		return "antigravity";
 	return undefined;
 }
 
@@ -115,13 +151,40 @@ export function parseCodexUsageBody(
 	const secondary = usageWindow(rateLimit.secondary_window, 7 * 24 * 60 * 60);
 	if (!primary && !secondary) return undefined;
 	const credits = record(source.credits);
+	const resetCreditsValue = source.rate_limit_reset_credits;
+	const resetCredits = record(resetCreditsValue);
+	const parsedResetCredits =
+		finiteNumber(resetCreditsValue) ??
+		finiteNumber(
+			resetCredits.available_count ??
+				resetCredits.available ??
+				resetCredits.remaining ??
+				resetCredits.balance ??
+				resetCredits.count,
+		);
+	// The live endpoint uses `available_count` for the total shown as "Usage limit resets";
+	// `applicable_available_count` can legitimately be zero when all two resets still exist.
+	// Treat null as no resets, but leave an unknown object shape unknown rather than claiming zero.
+	const rateLimitResetCredits = !Object.hasOwn(
+		source,
+		"rate_limit_reset_credits",
+	)
+		? undefined
+		: resetCreditsValue === null
+			? 0
+			: parsedResetCredits === undefined
+				? undefined
+				: Math.max(0, Math.floor(parsedResetCredits));
 	return {
 		provider,
 		family: "codex",
 		fetchedAt,
 		credentialHash,
 		plan: typeof source.plan_type === "string" ? source.plan_type : undefined,
-		account: typeof source.email === "string" && source.email.trim() ? source.email : undefined,
+		account:
+			typeof source.email === "string" && source.email.trim()
+				? source.email
+				: undefined,
 		// `limit_reached` is the negative statement and `allowed` the positive one; either alone
 		// is enough. Read both so a response that carries only one of them still answers.
 		serviceable:
@@ -133,13 +196,19 @@ export function parseCodexUsageBody(
 		primary,
 		secondary,
 		credits: {
-			hasCredits: typeof credits.has_credits === "boolean" ? credits.has_credits : undefined,
-			unlimited: typeof credits.unlimited === "boolean" ? credits.unlimited : undefined,
+			hasCredits:
+				typeof credits.has_credits === "boolean"
+					? credits.has_credits
+					: undefined,
+			unlimited:
+				typeof credits.unlimited === "boolean" ? credits.unlimited : undefined,
 			balance:
-				typeof credits.balance === "string" || typeof credits.balance === "number"
+				typeof credits.balance === "string" ||
+				typeof credits.balance === "number"
 					? String(credits.balance)
 					: undefined,
 		},
+		rateLimitResetCredits,
 	};
 }
 
@@ -170,20 +239,30 @@ function headerValue(headers: unknown, name: string): string | undefined {
 		return typeof value === "string" ? value : undefined;
 	}
 	for (const [key, value] of Object.entries(record(headers))) {
-		if (key.toLowerCase() === name.toLowerCase() && value !== undefined) return String(value);
+		if (key.toLowerCase() === name.toLowerCase() && value !== undefined)
+			return String(value);
 	}
 	return undefined;
 }
 
-function headerWindow(headers: unknown, prefix: "primary" | "secondary"): UsageWindow | undefined {
-	const usedPercent = percent(headerValue(headers, `x-codex-${prefix}-used-percent`));
+function headerWindow(
+	headers: unknown,
+	prefix: "primary" | "secondary",
+): UsageWindow | undefined {
+	const usedPercent = percent(
+		headerValue(headers, `x-codex-${prefix}-used-percent`),
+	);
 	const resetAt = epochMs(headerValue(headers, `x-codex-${prefix}-reset-at`));
-	const windowMinutes = finiteNumber(headerValue(headers, `x-codex-${prefix}-window-minutes`));
+	const windowMinutes = finiteNumber(
+		headerValue(headers, `x-codex-${prefix}-window-minutes`),
+	);
 	if (usedPercent === undefined || resetAt === undefined) return undefined;
 	return {
 		usedPercent,
 		resetAt,
-		...(windowMinutes !== undefined ? { windowSeconds: windowMinutes * 60 } : {}),
+		...(windowMinutes !== undefined
+			? { windowSeconds: windowMinutes * 60 }
+			: {}),
 	};
 }
 
@@ -205,10 +284,17 @@ export function parseCodexUsageHeaders(
 		primary,
 		secondary,
 		credits: {
-			hasCredits: headerValue(headers, "x-codex-credits-has-credits")?.toLowerCase() === "true",
-			unlimited: headerValue(headers, "x-codex-credits-unlimited")?.toLowerCase() === "true",
+			hasCredits:
+				headerValue(headers, "x-codex-credits-has-credits")?.toLowerCase() ===
+				"true",
+			unlimited:
+				headerValue(headers, "x-codex-credits-unlimited")?.toLowerCase() ===
+				"true",
 			balance: headerValue(headers, "x-codex-credits-balance"),
 		},
+		rateLimitResetCredits: finiteNumber(
+			headerValue(headers, "x-codex-rate-limit-reset-credits"),
+		),
 	};
 }
 
@@ -249,10 +335,7 @@ export function parseOllamaMeBody(
 		source.session_usage ??
 		source.SessionUsage;
 	const weeklySource =
-		source.weekly ??
-		source.Weekly ??
-		source.weekly_usage ??
-		source.WeeklyUsage;
+		source.weekly ?? source.Weekly ?? source.weekly_usage ?? source.WeeklyUsage;
 	const primary = usageWindow(sessionSource, 5 * 60 * 60);
 	const secondary = usageWindow(weeklySource, 7 * 24 * 60 * 60);
 	return {
@@ -279,7 +362,10 @@ async function fetchOllamaUsageSnapshot(
 		throw new UsageFetchError(`${provider} has no API key`);
 	}
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+	const timer = setTimeout(
+		() => controller.abort(),
+		options.timeoutMs ?? 10_000,
+	);
 	const fetchImpl = options.fetchImpl ?? fetch;
 	const headers = {
 		Authorization: `Bearer ${credential.key}`,
@@ -349,6 +435,151 @@ function fetchCursorUsageSnapshot(
 	};
 }
 
+async function fetchAntigravityUsageSnapshot(
+	provider: string,
+	credential: UsageCredential,
+	options: {
+		fetchImpl?: typeof fetch;
+		timeoutMs?: number;
+		credentialHash?: string;
+	} = {},
+): Promise<UsageSnapshot> {
+	if (credential.type !== "oauth" || !credential.access) {
+		throw new UsageFetchError(`${provider} has no OAuth access token`);
+	}
+	const fetchImpl = options.fetchImpl ?? fetch;
+	const timeout = options.timeoutMs ?? 10_000;
+	const headers = {
+		Authorization: `Bearer ${credential.access}`,
+		"Content-Type": "application/json",
+		"User-Agent": "antigravity/hub/2.8.0",
+		"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+		"Client-Metadata": JSON.stringify({
+			ideType: "ANTIGRAVITY",
+			platform: "PLATFORM_UNSPECIFIED",
+			pluginType: "GEMINI",
+		}),
+	};
+
+	let tierName: string | undefined;
+	let projectId: string | undefined = (credential as any).projectId;
+	const email: string | undefined = (credential as any).email;
+
+	// 1. loadCodeAssist for plan tier + project
+	try {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeout);
+		const res = await fetchImpl(
+			"https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+			{
+				method: "POST",
+				headers,
+				body: JSON.stringify({
+					metadata: {
+						ideType: "ANTIGRAVITY",
+						platform: "PLATFORM_UNSPECIFIED",
+						pluginType: "GEMINI",
+					},
+				}),
+				signal: controller.signal,
+			},
+		);
+		clearTimeout(timer);
+		if (res.ok) {
+			const data = (await res.json()) as any;
+			tierName = data.currentTier?.name || data.currentTier?.id;
+			if (!projectId && data.cloudaicompanionProject) {
+				projectId = data.cloudaicompanionProject;
+			}
+		}
+	} catch {
+		// loadCodeAssist is best-effort
+	}
+
+	// 2. fetchAvailableModels for quota pools
+	let primary: UsageWindow | undefined;
+	let secondary: UsageWindow | undefined;
+	let serviceable: boolean | undefined;
+
+	try {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeout);
+		const res = await fetchImpl(
+			"https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+			{
+				method: "POST",
+				headers,
+				body: JSON.stringify(projectId ? { project: projectId } : {}),
+				signal: controller.signal,
+			},
+		);
+		clearTimeout(timer);
+		if (res.ok) {
+			const data = (await res.json()) as any;
+			const models =
+				data?.models && typeof data.models === "object" ? data.models : {};
+
+			// Find quota info for Gemini pool and Claude pool
+			let geminiRemaining: number | undefined;
+			let geminiReset: number | undefined;
+			let claudeRemaining: number | undefined;
+			let claudeReset: number | undefined;
+
+			for (const [id, m] of Object.entries<any>(models)) {
+				const qi = m?.quotaInfo;
+				if (!qi || typeof qi.remainingFraction !== "number") continue;
+				const fraction = Math.max(0, Math.min(1, qi.remainingFraction));
+				const resetTime = qi.resetTime ? Date.parse(qi.resetTime) : undefined;
+
+				if (id.startsWith("gemini-") || id.startsWith("gemini_")) {
+					if (geminiRemaining === undefined || fraction < geminiRemaining) {
+						geminiRemaining = fraction;
+						geminiReset = resetTime;
+					}
+				} else if (id.startsWith("claude-") || id.startsWith("claude_")) {
+					if (claudeRemaining === undefined || fraction < claudeRemaining) {
+						claudeRemaining = fraction;
+						claudeReset = resetTime;
+					}
+				}
+			}
+
+			if (geminiRemaining !== undefined) {
+				primary = {
+					usedPercent: Math.round((1 - geminiRemaining) * 100),
+					resetAt: geminiReset ?? Date.now() + 5 * 3600 * 1000,
+					windowSeconds: 5 * 3600,
+				};
+			}
+			if (claudeRemaining !== undefined) {
+				secondary = {
+					usedPercent: Math.round((1 - claudeRemaining) * 100),
+					resetAt: claudeReset ?? Date.now() + 5 * 3600 * 1000,
+					windowSeconds: 5 * 3600,
+				};
+			}
+
+			if (geminiRemaining !== undefined || claudeRemaining !== undefined) {
+				serviceable = (geminiRemaining ?? 1) > 0 || (claudeRemaining ?? 1) > 0;
+			}
+		}
+	} catch {
+		// fetchAvailableModels is best-effort
+	}
+
+	return {
+		provider,
+		family: "antigravity",
+		fetchedAt: Date.now(),
+		credentialHash: options.credentialHash,
+		plan: tierName ?? "subscription",
+		account: email,
+		serviceable,
+		primary,
+		secondary,
+	};
+}
+
 export async function fetchUsageSnapshot(
 	provider: string,
 	credential: UsageCredential,
@@ -359,7 +590,8 @@ export async function fetchUsageSnapshot(
 	} = {},
 ): Promise<UsageSnapshot> {
 	const family = usageFamily(provider);
-	if (!family) throw new UsageFetchError(`Usage is not supported for ${provider}`);
+	if (!family)
+		throw new UsageFetchError(`Usage is not supported for ${provider}`);
 
 	if (family === "ollama") {
 		return fetchOllamaUsageSnapshot(provider, credential, options);
@@ -384,6 +616,9 @@ export async function fetchUsageSnapshot(
 			plan: "subscription · no usage endpoint",
 		};
 	}
+	if (family === "antigravity") {
+		return fetchAntigravityUsageSnapshot(provider, credential, options);
+	}
 	if (family === "qwen") {
 		// Qwen/Alibaba exposes no usage/quota endpoint over its API-key plans, so we
 		// report the plan honestly instead of attempting (and failing) an OAuth usage
@@ -401,7 +636,10 @@ export async function fetchUsageSnapshot(
 	}
 
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+	const timer = setTimeout(
+		() => controller.abort(),
+		options.timeoutMs ?? 10_000,
+	);
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${credential.access}`,
 		Accept: "application/json",
@@ -409,7 +647,8 @@ export async function fetchUsageSnapshot(
 	let url: string;
 	if (family === "codex") {
 		url = "https://chatgpt.com/backend-api/wham/usage";
-		if (credential.accountId) headers["ChatGPT-Account-Id"] = credential.accountId;
+		if (credential.accountId)
+			headers["ChatGPT-Account-Id"] = credential.accountId;
 	} else {
 		url = "https://api.anthropic.com/api/oauth/usage";
 		headers["anthropic-beta"] = "oauth-2025-04-20";
@@ -422,19 +661,38 @@ export async function fetchUsageSnapshot(
 			signal: controller.signal,
 		});
 		if (!response.ok) {
-			throw new UsageFetchError(`${provider} usage endpoint returned HTTP ${response.status}`, response.status);
+			throw new UsageFetchError(
+				`${provider} usage endpoint returned HTTP ${response.status}`,
+				response.status,
+			);
 		}
 		const body = await response.json();
 		const snapshot =
 			family === "codex"
-				? parseCodexUsageBody(provider, body, Date.now(), options.credentialHash)
-				: parseAnthropicUsageBody(provider, body, Date.now(), options.credentialHash);
-		if (!snapshot) throw new UsageFetchError(`${provider} usage endpoint returned no 5h/7d windows`);
+				? parseCodexUsageBody(
+						provider,
+						body,
+						Date.now(),
+						options.credentialHash,
+					)
+				: parseAnthropicUsageBody(
+						provider,
+						body,
+						Date.now(),
+						options.credentialHash,
+					);
+		if (!snapshot)
+			throw new UsageFetchError(
+				`${provider} usage endpoint returned no 5h/7d windows`,
+			);
 		return snapshot;
 	} catch (error) {
 		if (error instanceof UsageFetchError) throw error;
-		if ((error as any)?.name === "AbortError") throw new UsageFetchError(`${provider} usage request timed out`);
-		throw new UsageFetchError(`${provider} usage request failed: ${error instanceof Error ? error.message : String(error)}`);
+		if ((error as any)?.name === "AbortError")
+			throw new UsageFetchError(`${provider} usage request timed out`);
+		throw new UsageFetchError(
+			`${provider} usage request failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	} finally {
 		clearTimeout(timer);
 	}
@@ -442,12 +700,20 @@ export async function fetchUsageSnapshot(
 
 export function providerUsageLabel(provider: string): string {
 	const index = provider.match(/-account-(\d+)$/)?.[1];
-	if (provider.startsWith("openai-codex")) return index ? `Codex A${index}` : "Codex";
-	if (provider.startsWith("anthropic")) return index ? `Claude A${index}` : "Claude";
-	if (provider.startsWith("ollama")) return index ? `Ollama A${index}` : "Ollama";
-	if (provider.startsWith("cursor")) return index ? `Cursor A${index}` : "Cursor";
-	if (provider.startsWith("kimi-coding")) return index ? `Kimi A${index}` : "Kimi";
-	if (provider.startsWith("alibaba") || /^qwen/i.test(provider)) return index ? `Qwen A${index}` : "Qwen/Alibaba";
+	if (provider.startsWith("openai-codex"))
+		return index ? `Codex A${index}` : "Codex";
+	if (provider.startsWith("anthropic"))
+		return index ? `Claude A${index}` : "Claude";
+	if (provider.startsWith("ollama"))
+		return index ? `Ollama A${index}` : "Ollama";
+	if (provider.startsWith("cursor"))
+		return index ? `Cursor A${index}` : "Cursor";
+	if (provider.startsWith("kimi-coding"))
+		return index ? `Kimi A${index}` : "Kimi";
+	if (provider.startsWith("antigravity"))
+		return index ? `Antigravity A${index}` : "Antigravity";
+	if (provider.startsWith("alibaba") || /^qwen/i.test(provider))
+		return index ? `Qwen A${index}` : "Qwen/Alibaba";
 	return provider;
 }
 
@@ -469,7 +735,9 @@ export function formatResetDuration(resetAt: number, now = Date.now()): string {
 /** Keep an email readable in a one-line footer without letting it dominate the line. */
 export function shortAccount(account: string | undefined): string | undefined {
 	if (!account) return undefined;
-	const local = account.includes("@") ? account.slice(0, account.indexOf("@")) : account;
+	const local = account.includes("@")
+		? account.slice(0, account.indexOf("@"))
+		: account;
 	return local.length > 18 ? `${local.slice(0, 17)}…` : local;
 }
 
@@ -487,6 +755,8 @@ export function windowLabel(
 ): string {
 	if (family === "cursor") return position === "primary" ? "auth" : "7d";
 	if (family === "ollama") return position === "primary" ? "cloud" : "weekly";
+	if (family === "antigravity")
+		return position === "primary" ? "gemini" : "claude";
 	const seconds = window.windowSeconds;
 	if (!seconds) return position === "primary" ? "5h" : "7d";
 	if (seconds >= 20 * 86_400) return "30d";
@@ -495,7 +765,10 @@ export function windowLabel(
 	return `${Math.max(1, Math.round(seconds / 3_600))}h`;
 }
 
-export function formatUsageCompact(snapshot: UsageSnapshot, now = Date.now()): string {
+export function formatUsageCompact(
+	snapshot: UsageSnapshot,
+	now = Date.now(),
+): string {
 	const who = shortAccount(snapshot.account);
 	const parts = [
 		who
@@ -504,7 +777,8 @@ export function formatUsageCompact(snapshot: UsageSnapshot, now = Date.now()): s
 	];
 	// The plan is what decides how much quota those percentages are a percentage OF — a free slot
 	// at 60% left and a Plus slot at 60% left are not comparable amounts of work.
-	if (snapshot.plan && (snapshot.primary || snapshot.secondary)) parts.push(snapshot.plan);
+	if (snapshot.plan && (snapshot.primary || snapshot.secondary))
+		parts.push(snapshot.plan);
 	// The account's own answer, when it gave one. A percentage is arithmetic on one window and can
 	// disagree with reality in both directions — an account reading 0% left was answering
 	// `allowed: true`, and showing only the 0% is what makes a working account look dead.
@@ -530,7 +804,34 @@ export function formatUsageCompact(snapshot: UsageSnapshot, now = Date.now()): s
 	return parts.join(" | ");
 }
 
-export function formatUsageDetails(snapshot: UsageSnapshot, now = Date.now()): string {
+export function formatUsageStatus(
+	snapshot: UsageSnapshot,
+	now = Date.now(),
+): string {
+	const who = shortAccount(snapshot.account);
+	const parts = [
+		`${providerUsageLabel(snapshot.provider)}${who ? ` ${who}` : ""}`,
+	];
+	if (snapshot.serviceable === false) parts.push("spent");
+	if (snapshot.primary)
+		parts.push(
+			`${windowLabel(snapshot.primary, snapshot.family, "primary")} ${remainingPercent(snapshot.primary)}%/${formatResetDuration(snapshot.primary.resetAt, now)}`,
+		);
+	if (snapshot.secondary)
+		parts.push(
+			`${windowLabel(snapshot.secondary, snapshot.family, "secondary")} ${remainingPercent(snapshot.secondary)}%/${formatResetDuration(snapshot.secondary.resetAt, now)}`,
+		);
+	if (snapshot.rateLimitResetCredits !== undefined)
+		parts.push(`reset ${snapshot.rateLimitResetCredits}`);
+	if (!snapshot.primary && !snapshot.secondary && snapshot.plan)
+		parts.push(snapshot.plan);
+	return parts.join(" · ");
+}
+
+export function formatUsageDetails(
+	snapshot: UsageSnapshot,
+	now = Date.now(),
+): string {
 	const lines = [
 		`Limits for ${providerUsageLabel(snapshot.provider)}${snapshot.account ? ` — ${snapshot.account}` : ""}${snapshot.plan ? ` (${snapshot.plan})` : ""}`,
 	];
@@ -563,12 +864,19 @@ export function formatUsageDetails(snapshot: UsageSnapshot, now = Date.now()): s
 		);
 	}
 	if (snapshot.credits?.unlimited) lines.push("Credits: unlimited");
-	else if (snapshot.credits?.balance !== undefined) lines.push(`Credits: ${snapshot.credits.balance}`);
+	else if (snapshot.credits?.balance !== undefined)
+		lines.push(`Credits: ${snapshot.credits.balance}`);
+	if (snapshot.rateLimitResetCredits !== undefined)
+		lines.push(
+			`Available rate-limit resets: ${snapshot.rateLimitResetCredits}`,
+		);
 	lines.push(`Updated ${formatResetDuration(now, snapshot.fetchedAt)} ago`);
 	return lines.join("\n");
 }
 
-export function usageColor(snapshot: UsageSnapshot): "success" | "warning" | "error" {
+export function usageColor(
+	snapshot: UsageSnapshot,
+): "success" | "warning" | "error" {
 	const remaining = [snapshot.primary, snapshot.secondary]
 		.filter((window): window is UsageWindow => !!window)
 		.map(remainingPercent);

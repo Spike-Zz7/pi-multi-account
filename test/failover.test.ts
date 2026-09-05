@@ -95,10 +95,10 @@ const {
 	persistRefreshedCredentials: (
 		authStorage: any,
 		provider: string,
-		credential: Record<string, unknown>,
+		credential: Credential,
 		io?: {
-			read?: () => Record<string, any>;
-			write?: (data: Record<string, any>) => void;
+			read?: () => Record<string, Credential>;
+			write?: (data: Record<string, Credential>) => void;
 		},
 	) => Promise<boolean>;
 	sameModelIdentity: (a: string | undefined, b: string | undefined) => boolean;
@@ -123,7 +123,7 @@ const SETTINGS = join(AGENT_DIR, "settings.json");
 const MODELS = join(AGENT_DIR, "models.json");
 const DEBUG_LOG = join(AGENT_DIR, "provider-failover-debug.log");
 
-function readDebugLog(): Array<Record<string, any>> {
+function readDebugLog(): Array<Record<string, unknown>> {
 	try {
 		return readFileSync(DEBUG_LOG, "utf8")
 			.split("\n")
@@ -323,7 +323,10 @@ function setup(opts: {
 		isIdle: () => idle,
 		// The host's ctx.compact(): fire-and-forget, resolves through the callbacks. The guard calls
 		// this only at a settled boundary, because the real one begins with an abort().
-		compact: (options?: { onComplete?: (r: unknown) => void; onError?: (e: Error) => void }) => {
+		compact: (options?: {
+			onComplete?: (r: unknown) => void;
+			onError?: (e: Error) => void;
+		}) => {
 			rec.compacts.push(options ?? {});
 			queueMicrotask(() => options?.onComplete?.({ summary: "test summary" }));
 		},
@@ -350,9 +353,7 @@ function setup(opts: {
 						return opts.hostCodexModels.map((id) => mkModel(provider, id));
 					}
 					return (
-						registeredModels.get(provider) ?? [
-							mkModel(provider, "claude-opus-4-8"),
-						]
+						registeredModels.get(provider) ?? [mkModel(provider, "claude-opus-4-8")]
 					);
 				}),
 			authStorage:
@@ -365,7 +366,7 @@ function setup(opts: {
 								JSON.parse(readFileSync(AUTH, "utf8"))[provider],
 							list: async () =>
 								Object.entries(
-									JSON.parse(readFileSync(AUTH, "utf8")) as Record<string, any>,
+									JSON.parse(readFileSync(AUTH, "utf8")) as Record<string, Credential>,
 								).map(([providerId, credential]) => ({
 									providerId,
 									type: credential.type,
@@ -428,7 +429,8 @@ function setup(opts: {
 				busEvents.set(name, handlers);
 			},
 			emit: (name: string, payload: any) => {
-				if (name === "pi:model-catalog:snapshot:v1") rec.catalogSnapshots.push(payload);
+				if (name === "pi:model-catalog:snapshot:v1")
+					rec.catalogSnapshots.push(payload);
 				for (const handler of busEvents.get(name) ?? []) handler(payload);
 			},
 		},
@@ -469,7 +471,10 @@ function setup(opts: {
 		},
 		sendUserMessage: (prompt: string, options?: Record<string, unknown>) =>
 			rec.sent.push({ prompt, options }),
-		sendMessage: (message: Record<string, unknown>, options?: Record<string, unknown>) => {
+		sendMessage: (
+			message: Record<string, unknown>,
+			options?: Record<string, unknown>,
+		) => {
 			rec.customMessages.push({ message, options });
 			return Promise.resolve();
 		},
@@ -559,11 +564,12 @@ function setup(opts: {
 	};
 	const command = async (args: string, name = "multi-account") => {
 		const subcommand = args.trim().split(/\s+/, 1)[0]?.toLowerCase() || "status";
-		const invokesStatus = name === "status" ||
-			(name === "multi-account" && subcommand === "status");
+		const invokesStatus =
+			name === "status" || (name === "multi-account" && subcommand === "status");
 		if (!invokesStatus) return commands[name]?.(args, ctx);
 		const originalFetch = globalThis.fetch;
-		globalThis.fetch = opts.statusFetch ?? (async () => new Response("", { status: 503 }));
+		globalThis.fetch =
+			opts.statusFetch ?? (async () => new Response("", { status: 503 }));
 		try {
 			return await commands[name]?.(args, ctx);
 		} finally {
@@ -655,7 +661,7 @@ test("usage footer countdown refreshes while the session is idle", async () => {
 	await t.fire("session_start");
 	const readCountdown = () => {
 		const value = t.rec.statuses.at(-1)?.value ?? "";
-		const match = /^Codex A2 \| 5h 99% left\/(\d+)m \| (?:\+\d+ ready|no spare)$/.exec(value);
+		const match = /^Codex A2 · 5h 99%\/(\d+)m · (?:\+\d+|no spare)$/.exec(value);
 		assert.ok(match, `unexpected footer value: ${JSON.stringify(value)}`);
 		return Number(match[1]);
 	};
@@ -677,120 +683,118 @@ test("usage footer countdown refreshes while the session is idle", async () => {
 	await t.fire("session_shutdown");
 });
 
-test(
-	"background usage refresh discovers an early Codex reset or plan upgrade on every benched account",
-	{ concurrency: false },
-	async () => {
-		const now = Date.now();
-		const accounts: Account = {
-			"openai-codex-account-2": {
-				type: "oauth",
-				access: "codex-access-2",
-				refresh: "codex-refresh-2",
-				accountId: "codex-account-2",
-			},
-			"openai-codex-account-3": {
-				type: "oauth",
-				access: "codex-access-3",
-				refresh: "codex-refresh-3",
-				accountId: "codex-account-3",
-			},
-			alibaba: { type: "api_key", key: "qwen-key" },
-		};
-		const hash = (value: string) =>
-			createHash("sha256").update(value).digest("hex").slice(0, 12);
-		const staleBlocked = (provider: string, access: string) => ({
-			provider,
-			family: "codex",
-			fetchedAt: now - 60_000,
-			credentialHash: hash(access),
-			plan: "free",
-			primary: {
-				usedPercent: 100,
-				resetAt: now + 30 * 24 * 60 * 60 * 1000,
-			},
-		});
-		const seenAccountIds: string[] = [];
-		const originalFetch = globalThis.fetch;
-		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
-			const headers = new Headers(init?.headers);
-			seenAccountIds.push(headers.get("ChatGPT-Account-Id") ?? "missing");
-			return new Response(
-				JSON.stringify({
-					plan_type: "pro",
-					rate_limit: {
-						primary_window: {
-							used_percent: 10,
-							reset_at: Math.floor((now + 60 * 60 * 1000) / 1000),
-						},
+test("background usage refresh discovers an early Codex reset or plan upgrade on every benched account", {
+	concurrency: false,
+}, async () => {
+	const now = Date.now();
+	const accounts: Account = {
+		"openai-codex-account-2": {
+			type: "oauth",
+			access: "codex-access-2",
+			refresh: "codex-refresh-2",
+			accountId: "codex-account-2",
+		},
+		"openai-codex-account-3": {
+			type: "oauth",
+			access: "codex-access-3",
+			refresh: "codex-refresh-3",
+			accountId: "codex-account-3",
+		},
+		alibaba: { type: "api_key", key: "qwen-key" },
+	};
+	const hash = (value: string) =>
+		createHash("sha256").update(value).digest("hex").slice(0, 12);
+	const staleBlocked = (provider: string, access: string) => ({
+		provider,
+		family: "codex",
+		fetchedAt: now - 60_000,
+		credentialHash: hash(access),
+		plan: "free",
+		primary: {
+			usedPercent: 100,
+			resetAt: now + 30 * 24 * 60 * 60 * 1000,
+		},
+	});
+	const seenAccountIds: string[] = [];
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async (
+		_input: string | URL | Request,
+		init?: RequestInit,
+	) => {
+		const headers = new Headers(init?.headers);
+		seenAccountIds.push(headers.get("ChatGPT-Account-Id") ?? "missing");
+		return new Response(
+			JSON.stringify({
+				plan_type: "pro",
+				rate_limit: {
+					primary_window: {
+						used_percent: 10,
+						reset_at: Math.floor((now + 60 * 60 * 1000) / 1000),
 					},
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		}) as typeof fetch;
-
-		const t = setup({
-			accounts,
-			current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
-			config: {
-				showUsage: true,
-				usageRefreshMs: 20,
-				usageStatusRefreshMs: 60_000,
-			},
-			seedState: {
-				stateVersion: 5,
-				exhaustedUntilByProvider: {
-					"openai-codex-account-2": now + 6 * 60 * 60 * 1000,
-					"openai-codex-account-3": now + 6 * 60 * 60 * 1000,
 				},
-				exhaustedUntilByModel: {},
-				lastProbeAtByProvider: {},
-				invalidatedByProvider: {},
-				usageByProvider: {
-					"openai-codex-account-2": staleBlocked(
-						"openai-codex-account-2",
-						"codex-access-2",
-					),
-					"openai-codex-account-3": staleBlocked(
-						"openai-codex-account-3",
-						"codex-access-3",
-					),
-				},
-				lastSwitches: [],
-			},
-		});
+			}),
+			{ status: 200, headers: { "content-type": "application/json" } },
+		);
+	}) as typeof fetch;
 
-		try {
-			await t.fire("session_start");
-			assert.deepEqual(seenAccountIds.sort(), [
-				"codex-account-2",
-				"codex-account-3",
-			]);
-			const state = t.readState();
-			assert.equal(
-				state.usageByProvider["openai-codex-account-2"].primary.usedPercent,
-				10,
-			);
-			assert.equal(
-				state.usageByProvider["openai-codex-account-3"].plan,
-				"pro",
-			);
-			assert.deepEqual(
-				t.rec.setModels,
-				[],
-				"startup must refresh the upgraded current account before switching away from it",
-			);
-			assert.ok(
-				!state.exhaustedUntilByProvider?.["openai-codex-account-2"] &&
-					!state.exhaustedUntilByProvider?.["openai-codex-account-3"],
-				"fresh headroom after a plan change must clear both stale cooldowns",
-			);
-		} finally {
-			await t.fire("session_shutdown");
-			globalThis.fetch = originalFetch;
-		}
-	},
-);
+	const t = setup({
+		accounts,
+		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
+		config: {
+			showUsage: true,
+			usageRefreshMs: 20,
+			usageStatusRefreshMs: 60_000,
+		},
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {
+				"openai-codex-account-2": now + 6 * 60 * 60 * 1000,
+				"openai-codex-account-3": now + 6 * 60 * 60 * 1000,
+			},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageByProvider: {
+				"openai-codex-account-2": staleBlocked(
+					"openai-codex-account-2",
+					"codex-access-2",
+				),
+				"openai-codex-account-3": staleBlocked(
+					"openai-codex-account-3",
+					"codex-access-3",
+				),
+			},
+			lastSwitches: [],
+		},
+	});
+
+	try {
+		await t.fire("session_start");
+		assert.deepEqual(seenAccountIds.sort(), [
+			"codex-account-2",
+			"codex-account-3",
+		]);
+		const state = t.readState();
+		assert.equal(
+			state.usageByProvider["openai-codex-account-2"].primary.usedPercent,
+			10,
+		);
+		assert.equal(state.usageByProvider["openai-codex-account-3"].plan, "pro");
+		assert.deepEqual(
+			t.rec.setModels,
+			[],
+			"startup must refresh the upgraded current account before switching away from it",
+		);
+		assert.ok(
+			!state.exhaustedUntilByProvider?.["openai-codex-account-2"] &&
+				!state.exhaustedUntilByProvider?.["openai-codex-account-3"],
+			"fresh headroom after a plan change must clear both stale cooldowns",
+		);
+	} finally {
+		await t.fire("session_shutdown");
+		globalThis.fetch = originalFetch;
+	}
+});
 
 // ---------------------------------------------------------------------------
 // One final error -> one decision
@@ -886,11 +890,7 @@ test("failover resumes with existing context instead of injecting a user message
 		prompt: "Refactor the auth module and add tests",
 	});
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate limit");
-	assert.equal(
-		t.rec.continueCalls.length,
-		1,
-		"must resume on the new provider",
-	);
+	assert.equal(t.rec.continueCalls.length, 1, "must resume on the new provider");
 	assert.equal(
 		t.rec.sent.length,
 		0,
@@ -1022,11 +1022,7 @@ test("no-fallback warning reports invalidated accounts separately from cooldowns
 		config: {
 			autoContinue: false,
 			autoDiscover: false,
-			fallbacks: [
-				"anthropic",
-				"openai-codex-account-2",
-				"openai-codex-account-3",
-			],
+			fallbacks: ["anthropic", "openai-codex-account-2", "openai-codex-account-3"],
 		},
 		seedState: {
 			stateVersion: 5,
@@ -1156,7 +1152,7 @@ test("different Team members sharing one Codex accountId remain separate rotatio
 	);
 });
 
-test("session start reports deterministic duplicate account slots", async () => {
+test("duplicate account slots stay visible in status without warning on every startup", async () => {
 	const accounts: Account = {
 		"openai-codex": {
 			type: "oauth",
@@ -1177,10 +1173,17 @@ test("session start reports deterministic duplicate account slots", async () => 
 	});
 	await t.fire("session_start", { reason: "startup" });
 	assert.ok(
+		!t.rec.notifies.some((message) => message.includes("duplicate account slot")),
+		`a safely skipped duplicate must not nag on every startup; notifies=${t.rec.notifies.join(" | ")}`,
+	);
+
+	t.rec.notifies.length = 0;
+	await t.command("status full");
+	assert.ok(
 		t.rec.notifies.some((message) =>
-			message.includes("openai-codex-account-2 duplicates openai-codex"),
+			message.includes("openai-codex-account-2 = openai-codex"),
 		),
-		"the user should be told which redundant slot to replace",
+		"the diagnostic status should still identify the redundant slot",
 	);
 });
 
@@ -1335,11 +1338,7 @@ test("an explicitly invalidated OAuth token is removed immediately and failover 
 		config: {
 			autoContinue: false,
 			autoDiscover: false,
-			fallbacks: [
-				"openai-codex-account-2",
-				"openai-codex-account-4",
-				"anthropic",
-			],
+			fallbacks: ["openai-codex-account-2", "openai-codex-account-4", "anthropic"],
 		},
 	});
 	await finishError(
@@ -1398,9 +1397,7 @@ test("an early-invalidated access token is force-refreshed and retried on the sa
 	assert.equal(t.rec.sent.length, 0);
 	assert.ok(!t.readState().invalidatedByProvider?.["openai-codex-account-2"]);
 	assert.ok(
-		t.rec.notifies.some((message) =>
-			message.includes("refreshed successfully"),
-		),
+		t.rec.notifies.some((message) => message.includes("refreshed successfully")),
 	);
 });
 
@@ -1485,7 +1482,7 @@ test("usage footer survives an OAuth token rotation instead of blanking", async 
 		.map((s) => s.value);
 	assert.ok(
 		footer.some(
-			(v) => typeof v === "string" && v.includes("Codex") && v.includes("left"),
+			(v) => typeof v === "string" && v.includes("Codex") && v.includes("5h"),
 		),
 		`footer must still show usage after a token rotation; got ${JSON.stringify(footer)}`,
 	);
@@ -1623,11 +1620,7 @@ test("a second account failure in the same agent chain is not hidden by the prev
 		config: {
 			autoContinue: false,
 			autoDiscover: false,
-			fallbacks: [
-				"openai-codex-account-2",
-				"openai-codex-account-4",
-				"anthropic",
-			],
+			fallbacks: ["openai-codex-account-2", "openai-codex-account-4", "anthropic"],
 		},
 	});
 	const error =
@@ -1948,6 +1941,43 @@ test("a cooled account stays skipped after its OAuth access token refreshes", as
 	);
 });
 
+test("successful manual switches are announced once and are not labelled as failover", async () => {
+	for (const scenario of [
+		{ command: "next", seedCooldownsMsFromNow: undefined, start: true },
+		{
+			command: "switch openai-codex-account-2",
+			seedCooldownsMsFromNow: undefined,
+			start: true,
+		},
+		// Do not run startup preflight here: it would correctly leave the seeded cooling account
+		// before the explicit `best` command gets a chance to exercise its own announcement path.
+		{
+			command: "best",
+			seedCooldownsMsFromNow: { anthropic: 60 * 60 * 1000 },
+			start: false,
+		},
+	]) {
+		const t = setup({
+			current: { provider: "anthropic", id: "claude-opus-4-8" },
+			seedCooldownsMsFromNow: scenario.seedCooldownsMsFromNow,
+		});
+		if (scenario.start) await t.fire("session_start");
+		t.rec.notifies.length = 0;
+
+		await t.command(scenario.command);
+
+		assert.ok(
+			!t.rec.notifies.some((message) => message.startsWith("Provider failover")),
+			`${scenario.command} is user-requested, not a failure; notifies=${t.rec.notifies.join(" | ")}`,
+		);
+		assert.equal(
+			t.rec.notifies.filter((message) => message.includes("switched to")).length,
+			1,
+			`${scenario.command} should announce the successful choice exactly once`,
+		);
+	}
+});
+
 test("manual next cycles through every account instead of ping-ponging between two", async () => {
 	const accounts: Account = {
 		anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -1995,7 +2025,11 @@ test("manual next cycles through every account instead of ping-ponging between t
 test("high reasoning is the baseline and is restored across every provider rotation", async () => {
 	const t = setup({
 		accounts: {
-			anthropic: { type: "oauth", access: "anthropic", refresh: "anthropic-refresh" },
+			anthropic: {
+				type: "oauth",
+				access: "anthropic",
+				refresh: "anthropic-refresh",
+			},
 			"openai-codex-account-2": {
 				type: "oauth",
 				access: "codex",
@@ -2383,8 +2417,18 @@ test("a session limit the usage window can't see is not hot-retried every second
 		},
 	});
 	await t.fire("session_start");
-	await finishError(t, "anthropic", "claude-opus-4-8", "usage limit has been reached");
-	await finishError(t, "anthropic", "claude-opus-4-8", "usage limit has been reached");
+	await finishError(
+		t,
+		"anthropic",
+		"claude-opus-4-8",
+		"usage limit has been reached",
+	);
+	await finishError(
+		t,
+		"anthropic",
+		"claude-opus-4-8",
+		"usage limit has been reached",
+	);
 	// Let several poll cycles elapse. The lying "usage says free" must no longer wipe the recorded
 	// cooldown, so the account stays benched with a real FUTURE recovery instead of being cleared and
 	// hot-retried. (Old code deleted the cooldown via applyUsageToCooldown → state was empty.)
@@ -2728,7 +2772,9 @@ test("Kimi alias slots (kimi-coding-account-2) join the rotation", async () => {
 		`expected 3 accounts in rotation, got: ${startup}`,
 	);
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
-	const switchedToKimi = t.rec.setModels.some((m) => m.startsWith("kimi-coding"));
+	const switchedToKimi = t.rec.setModels.some((m) =>
+		m.startsWith("kimi-coding"),
+	);
 	assert.ok(
 		switchedToKimi,
 		`a 429 on anthropic must fail over to a Kimi slot, got: ${t.rec.setModels.join(", ")}`,
@@ -3017,7 +3063,11 @@ test("only-active narrows /model to the active account and persists", async () =
 		.find((r) => r.provider === "anthropic");
 	assert.notEqual(anthropic?.models, 0, "the active provider keeps its models");
 	const cfg = JSON.parse(readFileSync(CONFIG, "utf8"));
-	assert.equal(cfg.onlyActive, true, "the flag must survive restarts via config");
+	assert.equal(
+		cfg.onlyActive,
+		true,
+		"the flag must survive restarts via config",
+	);
 	assert.ok(t.rec.notifies.at(-1)?.includes("only-active ON"));
 });
 
@@ -3191,58 +3241,54 @@ test("add cursor guides the user through subscription login, not API-key setup",
 // Cursor is optional: nothing about it may leak into a session that never asked
 // ---------------------------------------------------------------------------
 
-test(
-	"includeCursor default-on never registers a phantom cursor slot nor warns while the Cursor provider is not installed",
-	{ concurrency: false },
-	async () => {
-		uninstallCursorProvider();
-		const t = setup({ accounts: ONE_ACCOUNT, config: { includeCursor: true } });
+test("includeCursor default-on never registers a phantom cursor slot nor warns while the Cursor provider is not installed", {
+	concurrency: false,
+}, async () => {
+	uninstallCursorProvider();
+	const t = setup({ accounts: ONE_ACCOUNT, config: { includeCursor: true } });
 
-		await t.fire("session_start");
+	await t.fire("session_start");
+	await wait(120);
+	await t.command("status full");
+
+	const status = t.rec.notifies.find((message) =>
+		message.includes("Registered login slots"),
+	);
+	// A cursor slot backed by nothing would be offered by /login and could never work.
+	assert.ok(status, "status output should be produced");
+	assert.doesNotMatch(status, /cursor-account-\d/);
+	// And no unsolicited `git clone` instructions for a provider the user never asked for.
+	assert.equal(
+		t.rec.notifies.some((message) =>
+			message.includes("Cursor subscription support not found"),
+		),
+		false,
+	);
+	await t.fire("session_shutdown");
+});
+
+test("cloning the Cursor provider is enough: the spare cursor slot appears on the next rediscover", {
+	concurrency: false,
+}, async () => {
+	uninstallCursorProvider();
+	const t = setup({ accounts: ONE_ACCOUNT, config: { includeCursor: true } });
+	await t.fire("session_start");
+	await wait(120);
+
+	installCursorProvider();
+	try {
+		await t.command("rediscover");
 		await wait(120);
 		await t.command("status full");
-
-		const status = t.rec.notifies.find((message) =>
-			message.includes("Registered login slots"),
-		);
-		// A cursor slot backed by nothing would be offered by /login and could never work.
-		assert.ok(status, "status output should be produced");
-		assert.doesNotMatch(status, /cursor-account-\d/);
-		// And no unsolicited `git clone` instructions for a provider the user never asked for.
-		assert.equal(
-			t.rec.notifies.some((message) =>
-				message.includes("Cursor subscription support not found"),
-			),
-			false,
-		);
-		await t.fire("session_shutdown");
-	},
-);
-
-test(
-	"cloning the Cursor provider is enough: the spare cursor slot appears on the next rediscover",
-	{ concurrency: false },
-	async () => {
+		const status = t.rec.notifies
+			.filter((message) => message.includes("Registered login slots"))
+			.at(-1);
+		assert.match(status ?? "", /cursor-account-2/);
+	} finally {
 		uninstallCursorProvider();
-		const t = setup({ accounts: ONE_ACCOUNT, config: { includeCursor: true } });
-		await t.fire("session_start");
-		await wait(120);
-
-		installCursorProvider();
-		try {
-			await t.command("rediscover");
-			await wait(120);
-			await t.command("status full");
-			const status = t.rec.notifies
-				.filter((message) => message.includes("Registered login slots"))
-				.at(-1);
-			assert.match(status ?? "", /cursor-account-2/);
-		} finally {
-			uninstallCursorProvider();
-			await t.fire("session_shutdown");
-		}
-	},
-);
+		await t.fire("session_shutdown");
+	}
+});
 
 test("remove codex drops the highest numbered authed alias slot", async () => {
 	const accounts: Account = {
@@ -3338,16 +3384,8 @@ test("transient overload retries the same account instead of rotating siblings",
 		"pending retry must be armed",
 	);
 	await wait(1300);
-	assert.equal(
-		t.rec.setModels.length,
-		0,
-		"retry must stay on the same account",
-	);
-	assert.equal(
-		t.rec.continueCalls.length,
-		1,
-		"resume must fire after cooldown",
-	);
+	assert.equal(t.rec.setModels.length, 0, "retry must stay on the same account");
+	assert.equal(t.rec.continueCalls.length, 1, "resume must fire after cooldown");
 	assert.equal(t.rec.sent.length, 0);
 });
 
@@ -3803,7 +3841,11 @@ test("session_before_compact: a healthy current account is compacted with a time
 		signal: { aborted: false },
 	});
 	assert.equal(result?.compaction?.summary, COMPACTION_SUMMARY.summary);
-	assert.deepEqual(tried, ["anthropic"], "compacts on the current account; no reroute");
+	assert.deepEqual(
+		tried,
+		["anthropic"],
+		"compacts on the current account; no reroute",
+	);
 	assert.ok(
 		!t.rec.notifies.some((n) => /summarizing on/i.test(n)),
 		"no 'summarizing on X instead' toast when the current account itself is live",
@@ -3822,14 +3864,7 @@ test("session_before_compact: a timed-out compact on the current healthy account
 			if (model.provider === "anthropic") {
 				return hangingCompact(() => {
 					abortedCurrent = true;
-				})(
-					preparation,
-					model,
-					apiKey,
-					headers,
-					instructions,
-					signal,
-				);
+				})(preparation, model, apiKey, headers, instructions, signal);
 			}
 			return Promise.resolve(COMPACTION_SUMMARY);
 		},
@@ -3875,9 +3910,7 @@ test("session_before_compact: routes the summary to a healthy account when the a
 		"compaction is routed to the healthy anthropic account, not the cooling codex one",
 	);
 	assert.ok(
-		!t.rec.compactionAuthFor.some((m) =>
-			m.startsWith("openai-codex-account-2/"),
-		),
+		!t.rec.compactionAuthFor.some((m) => m.startsWith("openai-codex-account-2/")),
 		"the cooling account is never chosen to summarize",
 	);
 	assert.equal(
@@ -3997,7 +4030,11 @@ test("session_before_compact: a timed-out live summary is aborted and cancelled 
 		undefined,
 		"no fake summary is returned after a timeout",
 	);
-	assert.equal(aborted, true, "the timed-out compact() call is aborted, not leaked");
+	assert.equal(
+		aborted,
+		true,
+		"the timed-out compact() call is aborted, not leaked",
+	);
 	assert.ok(
 		t.rec.notifies.some((n) => /cancelled instead of hanging/i.test(n)),
 		"the user is told the spinner will stop, not that Pi default will take over",
@@ -4059,14 +4096,7 @@ test("session_before_compact: a timeout on the first live account tries the next
 			if (model.provider === "anthropic") {
 				return hangingCompact(() => {
 					abortedFirst = true;
-				})(
-					preparation,
-					model,
-					apiKey,
-					headers,
-					instructions,
-					signal,
-				);
+				})(preparation, model, apiKey, headers, instructions, signal);
 			}
 			return Promise.resolve(COMPACTION_SUMMARY);
 		},
@@ -4317,16 +4347,24 @@ test("repeated identical internal faults are reported once, not spammed", async 
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
-	await t.fire("message_end", { message: faultyAssistantMessage() });
-	await t.fire("message_end", { message: faultyAssistantMessage() });
-	await t.fire("message_end", { message: faultyAssistantMessage() });
+	const realNow = Date.now;
+	let now = realNow();
+	Date.now = () => now;
+	try {
+		await t.fire("message_end", { message: faultyAssistantMessage() });
+		await t.fire("message_end", { message: faultyAssistantMessage() });
+		now += 31_000;
+		await t.fire("message_end", { message: faultyAssistantMessage() });
+	} finally {
+		Date.now = realNow;
+	}
 	const recovered = t.rec.notifies.filter((n) =>
 		/recovered from an internal error/i.test(n),
 	);
 	assert.equal(
 		recovered.length,
 		1,
-		"identical faults are deduped within the window (no notification storm)",
+		"the same persistent fault is reported only once, not again every 30 seconds",
 	);
 });
 
@@ -4369,8 +4407,7 @@ test("neverFailoverProviders leaves an unmanaged provider's own retry logic alon
 	assert.ok(
 		log.some(
 			(entry) =>
-				entry.kind === "failover_suppressed" &&
-				entry.provider === "self-retrying",
+				entry.kind === "failover_suppressed" && entry.provider === "self-retrying",
 		),
 		"the suppression must be visible in the black-box log, not silent",
 	);
@@ -4459,12 +4496,7 @@ test("exhausted account fails over to a sibling with the same model before any o
 	});
 	await t.fire("session_start");
 	await t.fire("agent_start");
-	await finishError(
-		t,
-		"kimi-coding-account-2",
-		"k3",
-		"429 rate_limit_error",
-	);
+	await finishError(t, "kimi-coding-account-2", "k3", "429 rate_limit_error");
 	assert.equal(
 		t.rec.setModels[0],
 		"kimi-coding/k3",
@@ -4499,12 +4531,7 @@ test("a sibling that already refused yields to another family", async () => {
 		"kimi-coding-account-2/k3",
 		`first hop stays in family; got ${t.rec.setModels.join(", ")}`,
 	);
-	await finishError(
-		t,
-		"kimi-coding-account-2",
-		"k3",
-		"429 rate_limit_error",
-	);
+	await finishError(t, "kimi-coding-account-2", "k3", "429 rate_limit_error");
 	assert.ok(
 		t.rec.setModels.some((m) => m.startsWith("anthropic/")),
 		`after the sibling also refused, another family must take over; got ${t.rec.setModels.join(", ")}`,
@@ -4713,7 +4740,12 @@ test("an unreleased Codex generation is also selectable on a numbered account al
 	});
 
 	await t.fire("session_start");
-	await finishError(t, "openai-codex-account-2", "gpt-5.6", "429 rate_limit_error");
+	await finishError(
+		t,
+		"openai-codex-account-2",
+		"gpt-5.6",
+		"429 rate_limit_error",
+	);
 
 	assert.equal(t.rec.setModels.at(-1), "openai-codex-account-3/gpt-5.6");
 	await t.fire("session_shutdown");
@@ -4745,11 +4777,7 @@ test("failover never downgrades across accounts: gpt-5.5 on a healthy account be
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: {
 			autoContinue: false,
-			fallbacks: [
-				"anthropic",
-				"openai-codex-account-2",
-				"openai-codex-account-3",
-			],
+			fallbacks: ["anthropic", "openai-codex-account-2", "openai-codex-account-3"],
 		},
 		// gpt-5.5 is model-cooled on the NEARER account (account-2) only; that account is otherwise
 		// healthy, so account-2/gpt-5.4 is available RIGHT NOW. account-3/gpt-5.5 is fully healthy.
@@ -4861,7 +4889,10 @@ test("disabled Codex discovery ignores persisted catalogs and keeps host models 
 	});
 
 	await t.fire("session_start");
-	assert.equal(t.ctx.modelRegistry.find(provider, "gpt-5.7-sol")?.id, "gpt-5.7-sol");
+	assert.equal(
+		t.ctx.modelRegistry.find(provider, "gpt-5.7-sol")?.id,
+		"gpt-5.7-sol",
+	);
 	assert.equal(t.ctx.modelRegistry.find(provider, "gpt-5.6-sol"), undefined);
 	await t.fire("session_shutdown");
 });
@@ -4883,11 +4914,17 @@ test("reload disabling Codex discovery replaces cached alias models with host mo
 		},
 	});
 	await t.fire("session_start");
-	assert.equal(t.ctx.modelRegistry.find(provider, "gpt-5.6-sol")?.name, "Cached 5.6 Sol");
+	assert.equal(
+		t.ctx.modelRegistry.find(provider, "gpt-5.6-sol")?.name,
+		"Cached 5.6 Sol",
+	);
 
 	writeFileSync(CONFIG, JSON.stringify({ autoDiscoverModels: false }));
 	await t.command("reload");
-	assert.equal(t.ctx.modelRegistry.find(provider, "gpt-5.7-sol")?.id, "gpt-5.7-sol");
+	assert.equal(
+		t.ctx.modelRegistry.find(provider, "gpt-5.7-sol")?.id,
+		"gpt-5.7-sol",
+	);
 	assert.equal(t.ctx.modelRegistry.find(provider, "gpt-5.6-sol"), undefined);
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate limit");
 	assert.equal(t.rec.setModels.at(-1), provider + "/gpt-5.7-sol");
@@ -4896,10 +4933,28 @@ test("reload disabling Codex discovery replaces cached alias models with host mo
 
 test("credential-free catalog snapshots preserve account-specific Codex availability", async () => {
 	const accounts = {
-		"openai-codex": { type: "oauth", access: "base", refresh: "base-r", accountId: "base" },
-		"openai-codex-account-5": { type: "oauth", access: "five", refresh: "five-r", accountId: "five" },
+		"openai-codex": {
+			type: "oauth",
+			access: "base",
+			refresh: "base-r",
+			accountId: "base",
+		},
+		"openai-codex-account-5": {
+			type: "oauth",
+			access: "five",
+			refresh: "five-r",
+			accountId: "five",
+		},
 	};
-	const model = (id: string) => ({ id, name: id, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 272000, maxTokens: 128000 });
+	const model = (id: string) => ({
+		id,
+		name: id,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272000,
+		maxTokens: 128000,
+	});
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex", id: "gpt-5.6-sol" },
@@ -4907,24 +4962,36 @@ test("credential-free catalog snapshots preserve account-specific Codex availabi
 		seedState: {
 			stateVersion: 5,
 			codexModelCatalogByProvider: {
-				"openai-codex": { fetchedAt: Date.now(), models: [model("gpt-5.6-sol"), model("gpt-5.6-terra")] },
-				"openai-codex-account-5": { fetchedAt: Date.now(), models: [model("gpt-5.6-terra"), model("gpt-5.5")] },
+				"openai-codex": {
+					fetchedAt: Date.now(),
+					models: [model("gpt-5.6-sol"), model("gpt-5.6-terra")],
+				},
+				"openai-codex-account-5": {
+					fetchedAt: Date.now(),
+					models: [model("gpt-5.6-terra"), model("gpt-5.5")],
+				},
 			},
 		},
 	});
 	await t.fire("session_start");
 	const snapshot = t.rec.catalogSnapshots.at(-1);
-	const base = snapshot.models.filter((entry: any) => entry.provider === "openai-codex").map((entry: any) => entry.id);
-	const account5 = snapshot.models.filter((entry: any) => entry.provider === "openai-codex-account-5").map((entry: any) => entry.id);
+	const base = snapshot.models
+		.filter((entry: any) => entry.provider === "openai-codex")
+		.map((entry: any) => entry.id);
+	const account5 = snapshot.models
+		.filter((entry: any) => entry.provider === "openai-codex-account-5")
+		.map((entry: any) => entry.id);
 	assert.ok(base.includes("gpt-5.6-sol"));
 	assert.deepEqual(account5.sort(), ["gpt-5.5", "gpt-5.6-terra"]);
 });
 
-test(
-	"live OpenAI catalog adds an unseen flagship to account aliases and failover selects it at high",
-	{ concurrency: false },
-	async (testContext) => {
-		testContext.mock.method(globalThis, "fetch", async () =>
+test("live OpenAI catalog adds an unseen flagship to account aliases and failover selects it at high", {
+	concurrency: false,
+}, async (testContext) => {
+	testContext.mock.method(
+		globalThis,
+		"fetch",
+		async () =>
 			new Response(
 				JSON.stringify({
 					models: [
@@ -4958,37 +5025,40 @@ test(
 				}),
 				{ status: 200, headers: { "content-type": "application/json" } },
 			),
-		);
-		const t = setup({
-			accounts: {
-				anthropic: { type: "oauth", access: "anthropic-access", refresh: "anthropic-refresh" },
-				"openai-codex-account-2": {
-					type: "oauth",
-					access: "codex-access",
-					refresh: "codex-refresh",
-					accountId: "codex-account",
-				},
+	);
+	const t = setup({
+		accounts: {
+			anthropic: {
+				type: "oauth",
+				access: "anthropic-access",
+				refresh: "anthropic-refresh",
 			},
-			current: { provider: "anthropic", id: "claude-opus-4-8" },
-			config: { autoDiscoverModels: true, reasoningLevel: "high" },
-		});
+			"openai-codex-account-2": {
+				type: "oauth",
+				access: "codex-access",
+				refresh: "codex-refresh",
+				accountId: "codex-account",
+			},
+		},
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: { autoDiscoverModels: true, reasoningLevel: "high" },
+	});
 
-		await t.fire("session_start");
-		await t.fire("agent_start");
-		await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	await t.fire("session_start");
+	await t.fire("agent_start");
+	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
 
-		assert.ok(
-			t.rec.setModels.includes("openai-codex-account-2/gpt-5.6-sol"),
-			`new flagship must be selectable without a static extension edit: ${JSON.stringify(t.rec.setModels)}`,
-		);
-		assert.ok(t.rec.thinkingLevels.includes("high"));
-		assert.ok(
-			!t.rec.thinkingLevels.includes("xhigh"),
-			"xhigh is an extreme opt-in level and must never be selected by default",
-		);
-		await t.fire("session_shutdown");
-	},
-);
+	assert.ok(
+		t.rec.setModels.includes("openai-codex-account-2/gpt-5.6-sol"),
+		`new flagship must be selectable without a static extension edit: ${JSON.stringify(t.rec.setModels)}`,
+	);
+	assert.ok(t.rec.thinkingLevels.includes("high"));
+	assert.ok(
+		!t.rec.thinkingLevels.includes("xhigh"),
+		"xhigh is an extreme opt-in level and must never be selected by default",
+	);
+	await t.fire("session_shutdown");
+});
 
 // ---------------------------------------------------------------------------
 // v1.13.0 black box: every decision is recorded so real bugs become reproducible
@@ -5229,12 +5299,19 @@ test("the turn that triggered the failover survives into the account that takes 
 	await t.fire("message_end", { message: interrupted });
 	t.setIdle(true);
 	await t.fire("agent_end", { messages: [interrupted] });
-	assert.ok(t.rec.setModels.length > 0, "the account must actually have switched");
+	assert.ok(
+		t.rec.setModels.length > 0,
+		"the account must actually have switched",
+	);
 
 	// The next request on the account we switched TO goes through the context hook.
 	const result = await t.fire("context", {
 		messages: [
-			{ role: "user", content: [{ type: "text", text: "migrate + seed" }], timestamp: 1 },
+			{
+				role: "user",
+				content: [{ type: "text", text: "migrate + seed" }],
+				timestamp: 1,
+			},
 			interrupted,
 		],
 	});
@@ -5245,9 +5322,15 @@ test("the turn that triggered the failover survives into the account that takes 
 		"nothing may be left for pi-ai to drop",
 	);
 	const handoff = JSON.stringify(result.messages);
-	assert.ok(handoff.includes("Schema first, then the seed."), "reasoning survives");
+	assert.ok(
+		handoff.includes("Schema first, then the seed."),
+		"reasoning survives",
+	);
 	assert.ok(handoff.includes("Applied migration 0042."), "output survives");
-	assert.ok(handoff.includes("npm run db:seed"), "the unfinished tool call survives");
+	assert.ok(
+		handoff.includes("npm run db:seed"),
+		"the unfinished tool call survives",
+	);
 	assert.ok(
 		handoff.includes("result: NONE"),
 		"the account taking over must be told which call never returned",
@@ -5271,7 +5354,11 @@ test("preserveInterruptedContext: false restores the old drop-everything behavio
 			},
 		],
 	});
-	assert.equal(result, undefined, "opted out: the transcript must pass through untouched");
+	assert.equal(
+		result,
+		undefined,
+		"opted out: the transcript must pass through untouched",
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -5358,7 +5445,10 @@ test("a blocked continuation records why, instead of failing silently", async ()
 	);
 	await wait(1300);
 	assert.equal(t.rec.sent.length, 0, "autoContinue: false must not inject");
-	const log = readFileSync(join(AGENT_DIR, "provider-failover-debug.log"), "utf8");
+	const log = readFileSync(
+		join(AGENT_DIR, "provider-failover-debug.log"),
+		"utf8",
+	);
 	assert.ok(
 		!log.includes("continuation_injection_blocked") ||
 			/"reason":"autoContinue disabled"/.test(log),
@@ -5802,7 +5892,11 @@ test("next says where it landed and whether that account is believed spent", asy
 	await t.command("next");
 
 	const said = t.rec.notifies.join("\n");
-	assert.match(said, /openai-codex-account-2/, "it must name the account it chose");
+	assert.match(
+		said,
+		/openai-codex-account-2/,
+		"it must name the account it chose",
+	);
 	assert.match(
 		said,
 		/spent|cooling|cooldown/i,
@@ -5825,21 +5919,41 @@ test("status is compact by default and points to full diagnostics", async () => 
 					provider: "anthropic",
 					family: "anthropic",
 					fetchedAt: now,
-					credentialHash: createHash("sha256").update("a-tok-1").digest("hex").slice(0, 12),
+					credentialHash: createHash("sha256")
+						.update("a-tok-1")
+						.digest("hex")
+						.slice(0, 12),
 					account: "claude@example.com",
 					plan: "pro",
 					serviceable: true,
-					primary: { usedPercent: 30, resetAt: now + 2 * 60 * 60 * 1000, windowSeconds: 18_000 },
+					primary: {
+						usedPercent: 30,
+						resetAt: now + 2 * 60 * 60 * 1000,
+						windowSeconds: 18_000,
+					},
 				},
 				"openai-codex-account-2": {
 					provider: "openai-codex-account-2",
 					family: "codex",
 					fetchedAt: now,
-					credentialHash: createHash("sha256").update("c-tok-2").digest("hex").slice(0, 12),
+					credentialHash: createHash("sha256")
+						.update("c-tok-2")
+						.digest("hex")
+						.slice(0, 12),
 					account: "owner@example.com",
 					plan: "team",
 					serviceable: true,
-					primary: { usedPercent: 14, resetAt: now + 4 * 60 * 60 * 1000, windowSeconds: 18_000 },
+					primary: {
+						usedPercent: 14,
+						resetAt: now + 4 * 60 * 60 * 1000,
+						windowSeconds: 18_000,
+					},
+					secondary: {
+						usedPercent: 25,
+						resetAt: now + 3 * 86_400_000,
+						windowSeconds: 604_800,
+					},
+					rateLimitResetCredits: 2,
 				},
 			},
 			lastSwitches: [],
@@ -5851,8 +5965,12 @@ test("status is compact by default and points to full diagnostics", async () => 
 	assert.match(status, /账号\s+owner@example\.com: Team/);
 	assert.match(status, /模型\s+gpt-5.6-sol/);
 	assert.match(status, /全部额度/);
-	assert.match(status, /owner@example\.com: Team\s+当前\n\s+可用.*5h 剩余 86%/);
-	assert.match(status, /claude@example\.com: Pro\n\s+可用.*5h 剩余 70%/);
+	assert.match(
+		status,
+		/owner@example\.com: Team\s+当前\n\s+可用\s+│\s+5h 剩余 86%[^\n]*后重置\s+│\s+7d 剩余 75%[^\n]*后重置\s+│\s+可用重置次数 2/,
+		"Codex verdict, 5h/7d countdowns, and available reset count should share one row",
+	);
+	assert.match(status, /claude@example\.com: Pro\n\s+可用\s+│\s+5h 剩余 70%/);
 	assert.doesNotMatch(status, /Codex A2|account-2/);
 	assert.match(status, /\/status full/);
 	assert.doesNotMatch(status, /Registered login slots/);
@@ -5865,18 +5983,19 @@ test("status is compact by default and points to full diagnostics", async () => 
 	assert.match(fullStatus, /Resume watchdog/);
 });
 
-test(
-	"status refreshes expired all-account quota once per TTL even when the footer is disabled",
-	{ concurrency: false },
-	async () => {
-		const now = Date.now();
-		const originalFetch = globalThis.fetch;
-		const fetched: string[] = [];
-		globalThis.fetch = (async (input: string | URL | Request) => {
-			const url = String(input);
-			fetched.push(url);
-			if (url.includes("chatgpt.com")) {
-				return new Response(JSON.stringify({
+test("status renders cached quota immediately and refreshes expired accounts in the background", {
+	concurrency: false,
+}, async () => {
+	const now = Date.now();
+	const originalFetch = globalThis.fetch;
+	const fetched: string[] = [];
+	globalThis.fetch = (async (input: string | URL | Request) => {
+		const url = String(input);
+		fetched.push(url);
+		await wait(100);
+		if (url.includes("chatgpt.com")) {
+			return new Response(
+				JSON.stringify({
 					email: "fresh@example.com",
 					plan_type: "team",
 					rate_limit: {
@@ -5891,9 +6010,12 @@ test(
 							reset_at: Math.floor((now + 5 * 24 * 60 * 60 * 1000) / 1000),
 						},
 					},
-				}), { status: 200 });
-			}
-			return new Response(JSON.stringify({
+				}),
+				{ status: 200 },
+			);
+		}
+		return new Response(
+			JSON.stringify({
 				five_hour: {
 					utilization: 10,
 					resets_at: new Date(now + 60 * 60 * 1000).toISOString(),
@@ -5902,75 +6024,85 @@ test(
 					utilization: 15,
 					resets_at: new Date(now + 4 * 24 * 60 * 60 * 1000).toISOString(),
 				},
-			}), { status: 200 });
-		}) as typeof fetch;
+			}),
+			{ status: 200 },
+		);
+	}) as typeof fetch;
 
-		const stale = now - 60 * 60 * 1000;
-		const hash = (token: string) =>
-			createHash("sha256").update(token).digest("hex").slice(0, 12);
-		const t = setup({
-			current: { provider: "openai-codex-account-2", id: "gpt-5.6-sol" },
-			config: { showUsage: false },
-			statusFetch: globalThis.fetch,
-			seedState: {
-				stateVersion: 5,
-				exhaustedUntilByProvider: {},
-				exhaustedUntilByModel: {},
-				lastProbeAtByProvider: {},
-				invalidatedByProvider: {},
-				usageByProvider: {
-					anthropic: {
-						provider: "anthropic",
-						family: "anthropic",
-						fetchedAt: stale,
-						credentialHash: hash("a-tok-1"),
-						primary: { usedPercent: 100, resetAt: now - 1 },
-					},
-					"openai-codex-account-2": {
-						provider: "openai-codex-account-2",
-						family: "codex",
-						fetchedAt: stale,
-						credentialHash: hash("c-tok-2"),
-						serviceable: false,
-						primary: { usedPercent: 100, resetAt: now - 1 },
-					},
+	const stale = now - 60 * 60 * 1000;
+	const hash = (token: string) =>
+		createHash("sha256").update(token).digest("hex").slice(0, 12);
+	const t = setup({
+		current: { provider: "openai-codex-account-2", id: "gpt-5.6-sol" },
+		config: { showUsage: false },
+		statusFetch: globalThis.fetch,
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageByProvider: {
+				anthropic: {
+					provider: "anthropic",
+					family: "anthropic",
+					fetchedAt: stale,
+					credentialHash: hash("a-tok-1"),
+					primary: { usedPercent: 100, resetAt: now - 1 },
 				},
-				lastSwitches: [],
+				"openai-codex-account-2": {
+					provider: "openai-codex-account-2",
+					family: "codex",
+					fetchedAt: stale,
+					credentialHash: hash("c-tok-2"),
+					serviceable: false,
+					primary: { usedPercent: 100, resetAt: now - 1 },
+				},
 			},
-		});
+			lastSwitches: [],
+		},
+	});
 
-		try {
-			await t.command("status");
-			const status = t.rec.notifies.at(-1) ?? "";
-			assert.match(status, /fresh@example\.com: Team/);
-			assert.match(status, /可用.*5h 剩余 80%/);
-			assert.equal(fetched.filter((url) => url.includes("wham/usage")).length, 1);
-			assert.equal(fetched.filter((url) => url.includes("oauth/usage")).length, 1);
+	try {
+		const startedAt = Date.now();
+		await t.command("status");
+		assert.ok(
+			Date.now() - startedAt < 80,
+			"status should render its cached snapshot without waiting for quota endpoints",
+		);
+		assert.doesNotMatch(t.rec.notifies.at(-1) ?? "", /fresh@example\.com/);
 
-			await t.command("limits refresh");
-			assert.match(t.rec.notifies.at(-1) ?? "", /80% left/);
-			assert.equal(
-				fetched.filter((url) => url.includes("wham/usage")).length,
-				2,
-				"an explicit active-account refresh must also work while the footer is disabled",
-			);
+		await wait(150);
+		await t.command("status");
+		const status = t.rec.notifies.at(-1) ?? "";
+		assert.match(status, /fresh@example\.com: Team/);
+		assert.match(status, /可用\s+│\s+5h 剩余 80%/);
+		assert.equal(fetched.filter((url) => url.includes("wham/usage")).length, 1);
+		assert.equal(fetched.filter((url) => url.includes("oauth/usage")).length, 1);
 
-			await t.command("status");
-			assert.equal(
-				fetched.filter((url) => url.includes("wham/usage")).length,
-				2,
-				"a repeated status inside the five-minute TTL must reuse the Codex cache",
-			);
-			assert.equal(
-				fetched.filter((url) => url.includes("oauth/usage")).length,
-				1,
-				"a repeated status inside the Anthropic TTL must reuse its cache",
-			);
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
-	},
-);
+		await t.command("limits refresh");
+		assert.match(t.rec.notifies.at(-1) ?? "", /80% left/);
+		assert.equal(
+			fetched.filter((url) => url.includes("wham/usage")).length,
+			2,
+			"an explicit active-account refresh must also work while the footer is disabled",
+		);
+
+		await t.command("status");
+		assert.equal(
+			fetched.filter((url) => url.includes("wham/usage")).length,
+			2,
+			"a repeated status inside the five-minute TTL must reuse the Codex cache",
+		);
+		assert.equal(
+			fetched.filter((url) => url.includes("oauth/usage")).length,
+			1,
+			"a repeated status inside the Anthropic TTL must reuse its cache",
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
 
 test("status shows how to switch to a specific account, not just next", async () => {
 	// The direct switch existed all along but was buried mid-way through one dense pipe-separated
@@ -5980,7 +6112,11 @@ test("status shows how to switch to a specific account, not just next", async ()
 	await t.command("status");
 
 	const said = t.rec.notifies.join("\n");
-	assert.match(said, /best.*next.*limits/, `status must show common account actions; said: ${said}`);
+	assert.match(
+		said,
+		/best.*next.*limits/,
+		`status must show common account actions; said: ${said}`,
+	);
 	assert.doesNotMatch(
 		t.rec.notifies.at(-1) ?? "",
 		/openai-codex-account-2/,
@@ -6022,7 +6158,10 @@ test("a provider outside the known families still joins the rotation", async () 
 	);
 
 	assert.ok(
-		t.rec.setModels.some((target: string) => target.startsWith("zai/") || target.startsWith("kimi-coding/")),
+		t.rec.setModels.some(
+			(target: string) =>
+				target.startsWith("zai/") || target.startsWith("kimi-coding/"),
+		),
 		`an unmanaged account must be a usable destination; switches were ${JSON.stringify(t.rec.setModels)}`,
 	);
 });
@@ -6052,7 +6191,11 @@ test("status names the unmanaged providers instead of hiding them", async () => 
 	await t.command("status");
 
 	const said = t.rec.notifies.join("\n");
-	assert.match(said, /zai/, `status must list unmanaged rotation members; said: ${said}`);
+	assert.match(
+		said,
+		/zai/,
+		`status must list unmanaged rotation members; said: ${said}`,
+	);
 	assert.match(
 		said,
 		/no quota tracking|without quota|no usage|无法追踪/i,
@@ -6151,7 +6294,11 @@ test("registering the Ollama base provider must not narrow the user's own model 
 			.getAll()
 			.filter((model: any) => model.provider === "ollama")
 			.map((model: any) => model.id);
-		for (const expected of ["glm-5.2:cloud", "qwen3.5:cloud", "deepseek-v4-flash:cloud"]) {
+		for (const expected of [
+			"glm-5.2:cloud",
+			"qwen3.5:cloud",
+			"deepseek-v4-flash:cloud",
+		]) {
 			assert.ok(
 				models.includes(expected),
 				`a configured model must survive registration; got ${JSON.stringify(models)}`,
@@ -6258,7 +6405,7 @@ test("a provider Pi has no models for is marked unconfigured instead of looking 
 
 const OPENROUTER_402 =
 	'402: {"message":"Prompt tokens limit exceeded: 38075 > 16958. To increase, visit ' +
-	"https://openrouter.ai/settings/credits and upgrade to a paid account\",\"code\":402," +
+	'https://openrouter.ai/settings/credits and upgrade to a paid account","code":402,' +
 	'"metadata":{"limit_source":"openrouter_credits","remedy_hint":"Add credits at ' +
 	"https://openrouter.ai/settings/credits, or lower max_tokens / prompt size to fit your " +
 	'remaining balance.","provider_name":null}}';
@@ -6734,11 +6881,15 @@ test("the footer says how many other accounts are ready, so 'switch to what?' ha
 	await t.fire("session_start");
 
 	const footer = t.rec.statuses.at(-1)?.value ?? "";
-	assert.match(footer, /someone/, `the footer must name the account in use; got: ${footer}`);
 	assert.match(
 		footer,
-		/\+\d+ ready|\d+ ready|no spare/i,
-		`and say whether anywhere else can take over; got: ${footer}`,
+		/someone/,
+		`the footer must name the account in use; got: ${footer}`,
+	);
+	assert.match(
+		footer,
+		/· (?:\+\d+|no spare)$/i,
+		`and compactly say whether anywhere else can take over; got: ${footer}`,
 	);
 });
 
@@ -6763,7 +6914,11 @@ test("an invalid_grant is retried with the token another process just wrote", as
 	// dropped and demands a re-login it does not need.
 	const attempts: string[] = [];
 	const result = await refreshWithDiskRetry({
-		credentials: { type: "oauth", access: "old-access", refresh: "stale-refresh" },
+		credentials: {
+			type: "oauth",
+			access: "old-access",
+			refresh: "stale-refresh",
+		},
 		refresh: async (credentials: any) => {
 			attempts.push(credentials.refresh);
 			if (credentials.refresh === "stale-refresh")
@@ -6780,7 +6935,11 @@ test("an invalid_grant is retried with the token another process just wrote", as
 		["stale-refresh", "fresh-refresh-from-disk"],
 		"the retry must use what is on disk now, not the credential it was handed",
 	);
-	assert.equal(result.access, "new-access", "and the refreshed token is what comes back");
+	assert.equal(
+		result.access,
+		"new-access",
+		"and the refreshed token is what comes back",
+	);
 });
 
 test("a genuinely revoked token is not retried in a loop", async () => {
@@ -6798,7 +6957,11 @@ test("a genuinely revoked token is not retried in a loop", async () => {
 		}),
 		/invalid_grant/,
 	);
-	assert.equal(calls, 1, "one attempt, because a second would send the identical token");
+	assert.equal(
+		calls,
+		1,
+		"one attempt, because a second would send the identical token",
+	);
 });
 
 test("a network failure is not mistaken for a revoked token", async () => {
@@ -6816,7 +6979,11 @@ test("a network failure is not mistaken for a revoked token", async () => {
 		}),
 		/ETIMEDOUT/,
 	);
-	assert.equal(calls, 1, "a transient error is not a reason to burn the disk token");
+	assert.equal(
+		calls,
+		1,
+		"a transient error is not a reason to burn the disk token",
+	);
 });
 
 test("a revoked Claude login explains what revoked it, not just 'run /login'", async () => {
@@ -6999,7 +7166,8 @@ test("an account with a usage endpoint still honours the recheck ceiling", async
 		"You have hit your ChatGPT usage limit. Try again in ~40000 min.",
 	);
 
-	const until = t.readState().exhaustedUntilByProvider?.["openai-codex-account-2"] ?? 0;
+	const until =
+		t.readState().exhaustedUntilByProvider?.["openai-codex-account-2"] ?? 0;
 	const minutes = Math.round((until - Date.now()) / 60_000);
 	assert.ok(
 		minutes <= 11,
@@ -7052,7 +7220,11 @@ test("an ambiguous short name is refused with the options, not guessed", async (
 	await t.command("switch codex");
 
 	const said = t.rec.notifies.join("\n");
-	assert.match(said, /openai-codex-account-2/, `it must list the candidates; said: ${said}`);
+	assert.match(
+		said,
+		/openai-codex-account-2/,
+		`it must list the candidates; said: ${said}`,
+	);
 	assert.match(said, /openai-codex-account-3/, `both of them; said: ${said}`);
 });
 
@@ -7273,12 +7445,17 @@ test("persistence falls through modify -> set -> auth.json instead of dropping t
 	// Neither method exists: write auth.json ourselves rather than lose a rotated token.
 	let written: any;
 	assert.equal(
-		await persistRefreshedCredentials({ reload: () => {} }, "anthropic", credential, {
-			read: () => ({ "openai-codex": { type: "oauth", access: "keep" } }),
-			write: (data) => {
-				written = data;
+		await persistRefreshedCredentials(
+			{ reload: () => {} },
+			"anthropic",
+			credential,
+			{
+				read: () => ({ "openai-codex": { type: "oauth", access: "keep" } }),
+				write: (data) => {
+					written = data;
+				},
 			},
-		}),
+		),
 		true,
 	);
 	assert.deepEqual(written, {
@@ -7443,7 +7620,12 @@ test("the published placeholder is the one the vendored proxy actually accepts",
 	// as "no token on this request". If the vendored provider ever stops doing that,
 	// publishing it would send a bogus bearer instead of falling back to the real token.
 	const shared = readFileSync(
-		join(dirname(fileURLToPath(import.meta.url)), "..", "cursor", "cursor-shared.ts"),
+		join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"cursor",
+			"cursor-shared.ts",
+		),
 		"utf8",
 	);
 	assert.match(
@@ -7465,7 +7647,11 @@ test("the published placeholder is the one the vendored proxy actually accepts",
 /** A conversation shaped like the real 78-minute run: mostly large tool results. */
 function bigConversation(turns: number) {
 	const messages: any[] = [
-		{ role: "user", content: [{ type: "text", text: "продовжуй" }], timestamp: 1 },
+		{
+			role: "user",
+			content: [{ type: "text", text: "продовжуй" }],
+			timestamp: 1,
+		},
 	];
 	for (let i = 0; i < turns; i++) {
 		messages.push({
@@ -7474,7 +7660,14 @@ function bigConversation(turns: number) {
 			model: "gpt-5.6-sol",
 			stopReason: "toolUse",
 			timestamp: 1000 + i,
-			content: [{ type: "toolCall", id: `call-${i}`, name: "read", arguments: { path: `f${i}.ts` } }],
+			content: [
+				{
+					type: "toolCall",
+					id: `call-${i}`,
+					name: "read",
+					arguments: { path: `f${i}.ts` },
+				},
+			],
 		});
 		messages.push({
 			role: "toolResult",
@@ -7499,12 +7692,20 @@ test("the context guard trims a mid-run request instead of letting it overflow",
 	const result = await t.fire("context", { messages });
 
 	assert.ok(result?.messages, "the guard must rewrite the outgoing request");
-	assert.equal(result.messages.length, messages.length, "no message may be dropped");
+	assert.equal(
+		result.messages.length,
+		messages.length,
+		"no message may be dropped",
+	);
 	const stubbed = result.messages.filter(
 		(m: any) =>
-			m.role === "toolResult" && String(m.content?.[0]?.text ?? "").includes("context-guard"),
+			m.role === "toolResult" &&
+			String(m.content?.[0]?.text ?? "").includes("context-guard"),
 	);
-	assert.ok(stubbed.length > 0, "old tool output must be left out of the request");
+	assert.ok(
+		stubbed.length > 0,
+		"old tool output must be left out of the request",
+	);
 	// The tail the agent is actively working in stays verbatim.
 	const last = result.messages[result.messages.length - 1];
 	assert.equal(String(last.content[0].text).includes("context-guard"), false);
@@ -7522,11 +7723,19 @@ test("the context guard asks for a real summary only once the agent has settled"
 	// throw away the work the agent is in the middle of.
 	t.setIdle(false);
 	await t.fire("agent_settled", {});
-	assert.equal(t.rec.compacts.length, 0, "compaction must never be triggered mid-run");
+	assert.equal(
+		t.rec.compacts.length,
+		0,
+		"compaction must never be triggered mid-run",
+	);
 
 	t.setIdle(true);
 	await t.fire("agent_settled", {});
-	assert.equal(t.rec.compacts.length, 1, "a settled boundary is where the summary belongs");
+	assert.equal(
+		t.rec.compacts.length,
+		1,
+		"a settled boundary is where the summary belongs",
+	);
 
 	// A compaction rebuilds the message list, so every elision key now points at history that is
 	// no longer in the request. If the guard kept them, the next small request would come back
@@ -7534,11 +7743,21 @@ test("the context guard asks for a real summary only once the agent has settled"
 	await t.fire("session_compact", {});
 	// 20 turns: comfortably under the soft line, but long enough that part of it sits outside the
 	// protected tail — so a stale elision key would visibly stub it.
-	const afterCompaction = await t.fire("context", { messages: bigConversation(20) });
-	assert.equal(afterCompaction, undefined, "stale elisions must not survive a summary");
+	const afterCompaction = await t.fire("context", {
+		messages: bigConversation(20),
+	});
+	assert.equal(
+		afterCompaction,
+		undefined,
+		"stale elisions must not survive a summary",
+	);
 	t.setIdle(true);
 	await t.fire("agent_settled", {});
-	assert.equal(t.rec.compacts.length, 1, "and it must not immediately ask again");
+	assert.equal(
+		t.rec.compacts.length,
+		1,
+		"and it must not immediately ask again",
+	);
 });
 
 test("the context guard stands down when the model's window is unknown", async () => {
@@ -7570,7 +7789,13 @@ test("the context guard leaves an ordinary conversation completely alone", async
 test("the context guard reports itself when the host stops calling the pre-request hook", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
 	t.ctx.model.contextWindow = 272_000;
-	const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
+	const usage = {
+		input: 100,
+		output: 10,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 110,
+	};
 	// Six LLM responses and not one `context` event: the hook the guard hangs off is gone.
 	for (let i = 0; i < 6; i++) {
 		await t.fire("message_end", {
@@ -7585,11 +7810,18 @@ test("the context guard reports itself when the host stops calling the pre-reque
 			},
 		});
 	}
-	const warning = t.rec.notifies.find((n: string) => n.includes("context guard is NOT running"));
-	assert.ok(warning, `expected a warning, got: ${JSON.stringify(t.rec.notifies)}`);
+	const warning = t.rec.notifies.find((n: string) =>
+		n.includes("context guard is NOT running"),
+	);
+	assert.ok(
+		warning,
+		`expected a warning, got: ${JSON.stringify(t.rec.notifies)}`,
+	);
 	// Said once, not on every turn.
 	assert.equal(
-		t.rec.notifies.filter((n: string) => n.includes("context guard is NOT running")).length,
+		t.rec.notifies.filter((n: string) =>
+			n.includes("context guard is NOT running"),
+		).length,
 		1,
 	);
 });
@@ -7598,7 +7830,13 @@ test("the context guard says so when it has no window to measure against", async
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
 	// mkModel has no contextWindow — the guard stands down, and silently standing down is exactly
 	// the state a user must be told about rather than left to discover from an overflow.
-	const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
+	const usage = {
+		input: 100,
+		output: 10,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 110,
+	};
 	for (let i = 0; i < 6; i++) {
 		await t.fire("context", { messages: bigConversation(1) });
 		await t.fire("message_end", {
@@ -7618,7 +7856,9 @@ test("the context guard says so when it has no window to measure against", async
 		`expected a stand-down warning, got: ${JSON.stringify(t.rec.notifies)}`,
 	);
 	assert.equal(
-		t.rec.notifies.some((n: string) => n.includes("context guard is NOT running")),
+		t.rec.notifies.some((n: string) =>
+			n.includes("context guard is NOT running"),
+		),
 		false,
 		"the hook is alive here — only the window is missing",
 	);
@@ -7628,7 +7868,13 @@ test("a healthy guarded session says nothing at all", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
 	t.ctx.model.contextWindow = 272_000;
 	t.ctx.getSystemPrompt = () => "";
-	const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
+	const usage = {
+		input: 100,
+		output: 10,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 110,
+	};
 	for (let i = 0; i < 6; i++) {
 		await t.fire("context", { messages: bigConversation(1) });
 		await t.fire("message_end", {
@@ -7661,7 +7907,10 @@ test("a healthy guarded session says nothing at all", async () => {
 // ---------------------------------------------------------------------------
 
 /** Fire session_compact the way Pi does mid-run: the run loop is still live. */
-async function fireCompact(t: ReturnType<typeof setup>, over: Record<string, unknown> = {}) {
+async function fireCompact(
+	t: ReturnType<typeof setup>,
+	over: Record<string, unknown> = {},
+) {
 	t.setIdle(false);
 	return t.fire("session_compact", {
 		compactionEntry: { type: "compaction", summary: "s", firstKeptEntryId: "e1" },
@@ -7687,7 +7936,11 @@ test("an automatic compaction carries the task on instead of ending the run", as
 	// followUp is what agent.continue() drains when the last message is an assistant — which is
 	// always the case right after a compaction rebuilt the context.
 	assert.equal(queued[0].options?.deliverAs, "followUp");
-	assert.equal(queued[0].message.display, true, "the user must be able to see why it carried on");
+	assert.equal(
+		queued[0].message.display,
+		true,
+		"the user must be able to see why it carried on",
+	);
 	const text = String(queued[0].message.content);
 	assert.match(text, /compacted/i);
 	// The escape hatch that makes this safe: ~a third of compactions land on finished work, and
@@ -7701,7 +7954,11 @@ test("it stays out of the way when Pi is already continuing the turn itself", as
 	await t.fire("agent_start");
 	// Overflow recovery: Pi returns true from _runAutoCompaction on its own and calls continue().
 	await fireCompact(t, { reason: "overflow", willRetry: true });
-	assert.equal(continuations(t).length, 0, "a second queued message would double the turn");
+	assert.equal(
+		continuations(t).length,
+		0,
+		"a second queued message would double the turn",
+	);
 });
 
 test("a manual /compact is a deliberate pause and is never resumed", async () => {
@@ -7739,7 +7996,11 @@ test("pressing Esc stops the work; a compaction must not undo that", async () =>
 	t.setIdle(true);
 	await t.fire("agent_end", { messages: [aborted] });
 	await fireCompact(t);
-	assert.equal(continuations(t).length, 0, "the user cancelled — carrying on would override them");
+	assert.equal(
+		continuations(t).length,
+		0,
+		"the user cancelled — carrying on would override them",
+	);
 });
 
 test("the auto-continue budget is shared with failover, not doubled", async () => {
@@ -7752,7 +8013,11 @@ test("the auto-continue budget is shared with failover, not doubled", async () =
 	await fireCompact(t);
 	assert.equal(continuations(t).length, 2, "within budget");
 	await fireCompact(t);
-	assert.equal(continuations(t).length, 2, "a task must not be able to keep itself alive forever");
+	assert.equal(
+		continuations(t).length,
+		2,
+		"a task must not be able to keep itself alive forever",
+	);
 });
 
 test("contextGuard and continueAfterCompaction can each be turned off alone", async () => {
@@ -7782,8 +8047,18 @@ test("contextGuard and continueAfterCompaction can each be turned off alone", as
 /** Three live families plus a per-token provider, none of them cooling. */
 const LADDER_ACCOUNTS = {
 	anthropic: { type: "oauth" as const, access: "a", refresh: "ar" },
-	"kimi-coding-account-2": { type: "oauth" as const, access: "k", refresh: "kr", accountId: "k2" },
-	cursor: { type: "oauth" as const, access: "c", refresh: "cr", accountId: "cur" },
+	"kimi-coding-account-2": {
+		type: "oauth" as const,
+		access: "k",
+		refresh: "kr",
+		accountId: "k2",
+	},
+	cursor: {
+		type: "oauth" as const,
+		access: "c",
+		refresh: "cr",
+		accountId: "cur",
+	},
 	openrouter: { type: "api_key" as const, key: "or-key" },
 };
 
@@ -7792,7 +8067,10 @@ test("the ladder decides the hop the telemetry cannot", async () => {
 	// exact spot where the old order fell through to discovery sequence and the destination was
 	// effectively arbitrary.
 	const t = setup({
-		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
+		accounts: {
+			...LADDER_ACCOUNTS,
+			"openai-codex": { type: "oauth", access: "o", refresh: "or2" },
+		},
 		current: { provider: "openai-codex", id: "gpt-5.5" },
 		config: { providerPriority: ["cursor", "kimi-coding", "anthropic"] },
 	});
@@ -7806,7 +8084,10 @@ test("the ladder decides the hop the telemetry cannot", async () => {
 test("reordering the ladder reorders the hop", async () => {
 	// The same starting position, one setting different — nothing else may explain the change.
 	const t = setup({
-		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
+		accounts: {
+			...LADDER_ACCOUNTS,
+			"openai-codex": { type: "oauth", access: "o", refresh: "or2" },
+		},
 		current: { provider: "openai-codex", id: "gpt-5.5" },
 		config: { providerPriority: ["anthropic", "cursor", "kimi-coding"] },
 	});
@@ -7821,7 +8102,10 @@ test("a per-token account is not spent while a flat-rate one is free", async () 
 	// Never reached automatically in 602 failovers, which was right — but by accident of
 	// `providerOrder` being unable to name it, not by a policy anyone chose. Now it is the policy.
 	const t = setup({
-		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
+		accounts: {
+			...LADDER_ACCOUNTS,
+			"openai-codex": { type: "oauth", access: "o", refresh: "or2" },
+		},
 		current: { provider: "openai-codex", id: "gpt-5.5" },
 	});
 	await finishError(t, "openai-codex", "gpt-5.5", "429 rate limit");
@@ -7835,7 +8119,10 @@ test("a per-token account is not spent while a flat-rate one is free", async () 
 
 test("naming a per-token provider first is honoured — it is the user's money", async () => {
 	const t = setup({
-		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
+		accounts: {
+			...LADDER_ACCOUNTS,
+			"openai-codex": { type: "oauth", access: "o", refresh: "or2" },
+		},
 		current: { provider: "openai-codex", id: "gpt-5.5" },
 		config: { providerPriority: ["openrouter", "anthropic"] },
 	});
@@ -7853,8 +8140,18 @@ test("the ladder never pulls work off the current family while a sibling is free
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
-			"openai-codex": { type: "oauth", access: "o", refresh: "or2", accountId: "c1" },
-			"openai-codex-account-2": { type: "oauth", access: "o2", refresh: "or3", accountId: "c2" },
+			"openai-codex": {
+				type: "oauth",
+				access: "o",
+				refresh: "or2",
+				accountId: "c1",
+			},
+			"openai-codex-account-2": {
+				type: "oauth",
+				access: "o2",
+				refresh: "or3",
+				accountId: "c2",
+			},
 		},
 		current: { provider: "openai-codex", id: "gpt-5.5" },
 		config: { providerPriority: ["anthropic", "openai-codex"] },
@@ -7873,7 +8170,12 @@ test("the ladder never sends work to an account the provider says is spent", asy
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
-			"openai-codex-account-3": { type: "oauth", access: "c3", refresh: "r3", accountId: "codex-3" },
+			"openai-codex-account-3": {
+				type: "oauth",
+				access: "c3",
+				refresh: "r3",
+				accountId: "codex-3",
+			},
 			alibaba: { type: "api_key", key: "qwen-key" },
 		},
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -7905,12 +8207,18 @@ test("the ladder never sends work to an account the provider says is spent", asy
 
 test("an empty ladder leaves every ordering exactly as it was", async () => {
 	const t = setup({
-		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
+		accounts: {
+			...LADDER_ACCOUNTS,
+			"openai-codex": { type: "oauth", access: "o", refresh: "or2" },
+		},
 		current: { provider: "openai-codex", id: "gpt-5.5" },
 		config: { providerPriority: [] },
 	});
 	await finishError(t, "openai-codex", "gpt-5.5", "429 rate limit");
-	assert.ok(t.rec.setModels.length > 0, "failover must still happen with no stated preference");
+	assert.ok(
+		t.rec.setModels.length > 0,
+		"failover must still happen with no stated preference",
+	);
 });
 
 // ---- the command -----------------------------------------------------------
@@ -7934,7 +8242,11 @@ test("/multi-account priority sets, persists and confirms a new ladder", async (
 	await t.command("priority cursor claude kimi");
 	const said = t.rec.notifies.join("\n");
 	assert.match(said, /1\. cursor/);
-	assert.match(said, /2\. anthropic/, "nicknames are resolved before being stored");
+	assert.match(
+		said,
+		/2\. anthropic/,
+		"nicknames are resolved before being stored",
+	);
 	assert.match(said, /3\. kimi-coding/);
 	const raw = JSON.parse(readFileSync(CONFIG, "utf8"));
 	assert.deepEqual(raw.providerPriority, ["cursor", "anthropic", "kimi-coding"]);
@@ -7961,7 +8273,10 @@ test("/multi-account priority rejects an unreadable list instead of wiping the l
 test("/multi-account priority distinguishes reset from clear", async () => {
 	const t = setup({ current: { provider: "anthropic", id: "claude-opus-5" } });
 	await t.command("priority none");
-	assert.deepEqual(JSON.parse(readFileSync(CONFIG, "utf8")).providerPriority, []);
+	assert.deepEqual(
+		JSON.parse(readFileSync(CONFIG, "utf8")).providerPriority,
+		[],
+	);
 	assert.match(t.rec.notifies.join("\n"), /cleared/i);
 
 	await t.command("priority reset");
@@ -7985,13 +8300,19 @@ test("/multi-account priority distinguishes reset from clear", async () => {
 // ---------------------------------------------------------------------------
 
 const contractWarning = (t: ReturnType<typeof setup>) =>
-	t.rec.notifies.find((message) => message.includes("no longer matches what this extension"));
+	t.rec.notifies.find((message) =>
+		message.includes("no longer matches what this extension"),
+	);
 
 test("a healthy install says nothing about the file contract", async () => {
 	rmSync(MODELS, { force: true });
 	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
 	await t.fire("session_start");
-	assert.equal(contractWarning(t), undefined, `notifies=${t.rec.notifies.join(" | ")}`);
+	assert.equal(
+		contractWarning(t),
+		undefined,
+		`notifies=${t.rec.notifies.join(" | ")}`,
+	);
 	await t.fire("session_shutdown");
 });
 
@@ -8003,14 +8324,21 @@ test("a models.json written with bare model ids is reported at session start", a
 		JSON.stringify({
 			// A third-party provider on purpose: our own slots get rewritten by provisioning, and
 			// the point of the check is the file as the USER left it.
-			providers: { "my-local-thing": { api: "openai-completions", models: ["k3"] } },
+			providers: {
+				"my-local-thing": { api: "openai-completions", models: ["k3"] },
+			},
 		}),
 	);
 	try {
-		const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+		const t = setup({
+			current: { provider: "anthropic", id: "claude-opus-4-8" },
+		});
 		await t.fire("session_start");
 		const warning = contractWarning(t);
-		assert.ok(warning, `expected a contract warning; notifies=${t.rec.notifies.join(" | ")}`);
+		assert.ok(
+			warning,
+			`expected a contract warning; notifies=${t.rec.notifies.join(" | ")}`,
+		);
 		assert.match(warning, /models\.json/);
 		assert.match(warning, /bare string/);
 		// Blast radius, or it reads like a problem confined to one slot.
@@ -8024,7 +8352,9 @@ test("a models.json written with bare model ids is reported at session start", a
 test("a corrupt published file is reported rather than silently ignored", async () => {
 	writeFileSync(MODELS, "{ this is not json");
 	try {
-		const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+		const t = setup({
+			current: { provider: "anthropic", id: "claude-opus-4-8" },
+		});
 		await t.fire("session_start");
 		const warning = contractWarning(t);
 		assert.ok(warning, `notifies=${t.rec.notifies.join(" | ")}`);
@@ -8035,67 +8365,24 @@ test("a corrupt published file is reported rather than silently ignored", async 
 	}
 });
 
-test("settings.json is NOT judged before a switch has happened", async () => {
-	// At session start the file legitimately still names the previous session's choice. Warning
-	// about that would be noise on every single startup.
+test("a model switch does not judge settings.json startup defaults as live state", async () => {
+	// Pi 0.84 only rewrites these keys when a user explicitly saves a default. An ordinary
+	// model switch, including pi.setModel(), must leave the startup preference alone.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		settings: { defaultProvider: "openai-codex-account-2", defaultModel: "gpt-5.5" },
+		settings: { defaultProvider: "openai-codex", defaultModel: "gpt-5.5" },
 	});
 	await t.fire("session_start");
-	assert.equal(contractWarning(t), undefined, `notifies=${t.rec.notifies.join(" | ")}`);
-	await t.fire("session_shutdown");
-});
-
-test("after a switch, settings.json failing to name the live model is called out", async () => {
-	// This is the live failure that started all of this: the rotation was on Codex, settings.json
-	// said Anthropic, and a bare `--no-extensions` child ran on Anthropic and was billing-refused.
-	// Nothing in Pi promises those keys are maintained, so the only defence is to look.
-	const t = setup({
-		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		settings: { defaultProvider: "anthropic", defaultModel: "claude-opus-4-8" },
-		config: { debugLog: true },
+	t.setCurrent("antigravity", "gemini-3.8-flash");
+	await t.fire("model_select", {
+		model: { provider: "antigravity", id: "gemini-3.8-flash" },
 	});
-	await t.fire("session_start");
-	assert.equal(contractWarning(t), undefined, "nothing to judge yet");
-
-	// The session moves to another account and Pi does NOT rewrite settings.json — the exact
-	// failure being guarded against.
-	t.setCurrent("openai-codex-account-2", "gpt-5.5");
-	await t.fire("model_select", { model: { provider: "openai-codex-account-2", id: "gpt-5.5" } });
 	await t.fire("agent_start");
-
-	const warning = contractWarning(t);
-	assert.ok(warning, `expected a stale-default warning; notifies=${t.rec.notifies.join(" | ")}`);
-	assert.match(warning, /anthropic\/claude-opus-4-8/);
-	assert.match(warning, /openai-codex-account-2\/gpt-5\.5/);
-	// The consequence is the whole reason this matters — a child, not a cosmetic file.
-	assert.match(warning, /child/);
-
-	const logged = readDebugLog().filter((entry) => entry.kind === "pi_contract_checked");
-	assert.ok(logged.length > 0, "the black box must record the check");
-	assert.ok(
-		logged.at(-1)?.unpromised?.includes("settings-default-model-autowritten"),
-		"the log must name the unpromised assumption this check exists for",
+	assert.equal(
+		contractWarning(t),
+		undefined,
+		`notifies=${t.rec.notifies.join(" | ")}`,
 	);
-	await t.fire("session_shutdown");
-});
-
-test("after a switch, settings.json naming the live model is silent", async () => {
-	const t = setup({
-		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		settings: { defaultProvider: "anthropic", defaultModel: "claude-opus-4-8" },
-	});
-	await t.fire("session_start");
-	// Pi did its job: the file follows the switch.
-	t.setCurrent("openai-codex-account-2", "gpt-5.5");
-	writeFileSync(
-		SETTINGS,
-		JSON.stringify({ defaultProvider: "openai-codex-account-2", defaultModel: "gpt-5.5" }),
-	);
-	await t.fire("model_select", { model: { provider: "openai-codex-account-2", id: "gpt-5.5" } });
-	await t.fire("agent_start");
-	assert.equal(contractWarning(t), undefined, `notifies=${t.rec.notifies.join(" | ")}`);
 	await t.fire("session_shutdown");
 });
 
@@ -8113,7 +8400,11 @@ test("with the proxy off, status says which slots an extension-free child cannot
 		config: { childProxy: false },
 		accounts: {
 			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
-			"openai-codex-account-2": { type: "oauth", access: "c-tok-2", refresh: "c-ref-2" },
+			"openai-codex-account-2": {
+				type: "oauth",
+				access: "c-tok-2",
+				refresh: "c-ref-2",
+			},
 			zai: { type: "api_key", key: "sk-zai" },
 		},
 	});
@@ -8121,7 +8412,10 @@ test("with the proxy off, status says which slots an extension-free child cannot
 	t.rec.notifies.length = 0;
 	await t.command("status full");
 	const status = t.rec.notifies.at(-1) ?? "";
-	assert.match(status, /Extension-free children: \d+\/\d+ rotation slots usable/);
+	assert.match(
+		status,
+		/Extension-free children: \d+\/\d+ rotation slots usable/,
+	);
 	// The numbered OAuth slot is the unusable one; the built-in and the API-key account are not.
 	assert.match(status, /cannot authenticate: [^\n]*openai-codex-account-2/);
 	assert.equal(/cannot authenticate: [^\n]*\bzai\b/.test(status), false, status);
@@ -8135,7 +8429,10 @@ test("with the proxy off, status warns that the account a bare child picks up is
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
-		settings: { defaultProvider: "openai-codex-account-2", defaultModel: "gpt-5.5" },
+		settings: {
+			defaultProvider: "openai-codex-account-2",
+			defaultModel: "gpt-5.5",
+		},
 		config: { childProxy: false },
 	});
 	await t.fire("session_start");
@@ -8164,7 +8461,9 @@ test("a slot published against a parent-owned loopback route counts as usable", 
 		}),
 	);
 	try {
-		const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+		const t = setup({
+			current: { provider: "anthropic", id: "claude-opus-4-8" },
+		});
 		await t.fire("session_start");
 		t.rec.notifies.length = 0;
 		await t.command("status");
@@ -8186,10 +8485,17 @@ test("with the proxy on, the OAuth slots a child could not use become usable", a
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		settings: { defaultProvider: "openai-codex-account-2", defaultModel: "gpt-5.5" },
+		settings: {
+			defaultProvider: "openai-codex-account-2",
+			defaultModel: "gpt-5.5",
+		},
 		accounts: {
 			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
-			"openai-codex-account-2": { type: "oauth", access: "c-tok-2", refresh: "c-ref-2" },
+			"openai-codex-account-2": {
+				type: "oauth",
+				access: "c-tok-2",
+				refresh: "c-ref-2",
+			},
 		},
 	});
 	try {
@@ -8206,14 +8512,20 @@ test("with the proxy on, the OAuth slots a child could not use become usable", a
 
 		// And the route it was published against is this machine, with a non-secret placeholder —
 		// the real OAuth token must never be written into a file a child reads.
-		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers["openai-codex-account-2"];
+		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers[
+			"openai-codex-account-2"
+		];
 		assert.ok(slot, "the slot must be published for a bare child to resolve it");
 		assert.equal(new URL(slot.baseUrl).hostname, "127.0.0.1");
 		// A key must be published or Pi refuses the provider outright; which shape it takes per
 		// family is covered by its own test.
 		assert.ok(typeof slot.apiKey === "string" && slot.apiKey.length > 0);
 		const published = readFileSync(MODELS, "utf8");
-		assert.equal(published.includes("c-tok-2"), false, "no real token in a published file");
+		assert.equal(
+			published.includes("c-tok-2"),
+			false,
+			"no real token in a published file",
+		);
 		assert.equal(published.includes("c-ref-2"), false);
 	} finally {
 		await t.fire("session_shutdown");
@@ -8269,8 +8581,13 @@ test("the proxy swaps the placeholder for the real token and never forwards the 
 	const seen: Array<{ url: string; headers: Record<string, string> }> = [];
 	try {
 		await t.fire("session_start");
-		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers["openai-codex-account-2"];
-		assert.ok(slot?.baseUrl, "the slot must be published against the running proxy");
+		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers[
+			"openai-codex-account-2"
+		];
+		assert.ok(
+			slot?.baseUrl,
+			"the slot must be published against the running proxy",
+		);
 
 		globalThis.fetch = (async (input: any, init: any) => {
 			seen.push({ url: String(input), headers: { ...(init?.headers ?? {}) } });
@@ -8286,7 +8603,11 @@ test("the proxy swaps the placeholder for the real token and never forwards the 
 			"chatgpt-account-id": "pi-multi-account-proxy",
 		});
 		assert.equal(response.status, 200);
-		assert.equal(seen.length, 1, "the request must reach the upstream exactly once");
+		assert.equal(
+			seen.length,
+			1,
+			"the request must reach the upstream exactly once",
+		);
 		assert.equal(seen[0].url, "https://chatgpt.com/backend-api/codex/responses");
 		// The real credential is added here and only here — a child never holds it.
 		assert.equal(seen[0].headers.authorization, "Bearer c-tok-2");
@@ -8311,14 +8632,20 @@ test("the proxy refuses a caller that did not come from a slot we published", as
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		accounts: {
-			"openai-codex-account-2": { type: "oauth", access: "c-tok-2", refresh: "c-ref-2" },
+			"openai-codex-account-2": {
+				type: "oauth",
+				access: "c-tok-2",
+				refresh: "c-ref-2",
+			},
 		},
 	});
 	const realFetch = globalThis.fetch;
 	let upstreamCalls = 0;
 	try {
 		await t.fire("session_start");
-		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers["openai-codex-account-2"];
+		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers[
+			"openai-codex-account-2"
+		];
 		globalThis.fetch = (async () => {
 			upstreamCalls++;
 			return new Response("{}", { status: 200 });
@@ -8334,9 +8661,13 @@ test("the proxy refuses a caller that did not come from a slot we published", as
 		assert.equal(wrongKey.body.includes("sk-someone-elses-key"), false);
 
 		const port = new URL(slot.baseUrl).port;
-		const unknownSlot = await callProxy(`http://127.0.0.1:${port}/anthropic-account-9`, "/v1/messages", {
-			authorization: `Bearer ${slot.apiKey}`,
-		});
+		const unknownSlot = await callProxy(
+			`http://127.0.0.1:${port}/anthropic-account-9`,
+			"/v1/messages",
+			{
+				authorization: `Bearer ${slot.apiKey}`,
+			},
+		);
 		assert.equal(unknownSlot.status, 404);
 
 		assert.equal(upstreamCalls, 0, "no refused request may reach an upstream");
@@ -8354,14 +8685,20 @@ test("the proxy refuses a WebSocket upgrade so Pi falls back to SSE without a wa
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		accounts: {
-			"openai-codex-account-2": { type: "oauth", access: "c-tok-2", refresh: "c-ref-2" },
+			"openai-codex-account-2": {
+				type: "oauth",
+				access: "c-tok-2",
+				refresh: "c-ref-2",
+			},
 		},
 	});
 	const realFetch = globalThis.fetch;
 	let upstreamCalls = 0;
 	try {
 		await t.fire("session_start");
-		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers["openai-codex-account-2"];
+		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers[
+			"openai-codex-account-2"
+		];
 		globalThis.fetch = (async () => {
 			upstreamCalls++;
 			return new Response("{}", { status: 200 });
@@ -8406,7 +8743,10 @@ test("the Codex slot is published with a token-shaped placeholder that carries n
 			Buffer.from(String(slot.apiKey).split(".")[1], "base64").toString("utf8"),
 		);
 		// The user's real account id must not be in a file a child reads — the proxy substitutes it.
-		assert.equal(payload["https://api.openai.com/auth"].chatgpt_account_id, "pi-multi-account-proxy");
+		assert.equal(
+			payload["https://api.openai.com/auth"].chatgpt_account_id,
+			"pi-multi-account-proxy",
+		);
 		assert.equal(published.includes("acct-real-9"), false);
 		assert.equal(published.includes("c-tok-2"), false);
 	} finally {
